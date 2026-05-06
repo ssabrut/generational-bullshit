@@ -18,7 +18,11 @@ help:
 	@echo "  clean             Remove merged local branches"
 
 pull:
-	git pull $(REMOTE) $(BRANCH) --rebase
+	@if [ "$(rebase)" = "true" ]; then \
+		git pull $(REMOTE) $(BRANCH) --rebase; \
+	else \
+		git pull $(REMOTE) $(BRANCH); \
+	fi
 
 push:
 	@if [ -z "$(msg)" ]; then echo "Error: provide msg='your commit message'"; exit 1; fi
