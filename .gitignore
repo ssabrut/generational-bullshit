@@ -10,6 +10,9 @@ __pycache__/
 runs/
 notebooks/model/test-2/
 
+#datasets
+data/SFPI/
+
 # Distribution / packaging
 .Python
 build/
