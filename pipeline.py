@@ -1,17 +1,23 @@
 from __future__ import annotations
 
+import json
 import sys
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 import cv2
 import networkx as nx
 import numpy as np
 from skimage import img_as_bool
 from skimage.morphology import skeletonize
+from ultralytics import YOLO
 
 from preprocessing import FloorPlanPreprocessor, PipelineResult
+
+OPENING_CLASSES = {"door", "2door", "window"}
+SNAP_PX = 20  # bbox proximity (px) to count a corner as "touching" an opening
 
 
 @dataclass
@@ -22,21 +28,15 @@ class SkeletonGraph:
     graph: nx.Graph                 # undirected wall graph (nodes=corners, edges=walls)
 
 
+@dataclass
+class FloorPlanOutput:
+    prep: PipelineResult
+    skel: SkeletonGraph
+    graph: nx.Graph                 # combined graph: corner + opening nodes
+    json: dict[str, Any]            # structured JSON ready for export
+
+
 # ── Binary cleanup helpers ────────────────────────────────────────────────────
-
-def _crop_to_content(binary: np.ndarray, margin: int = -10) -> np.ndarray:
-    coords = np.column_stack(np.where(binary > 0))
-    if len(coords) == 0:
-        return binary
-    y_min, x_min = coords.min(axis=0)
-    y_max, x_max = coords.max(axis=0)
-    H, W = binary.shape
-    y_min = max(0, y_min + margin)
-    x_min = max(0, x_min + margin)
-    y_max = min(H, y_max - margin)
-    x_max = min(W, x_max - margin)
-    return binary[y_min:y_max, x_min:x_max]
-
 
 def _remove_noise(binary: np.ndarray, min_area_ratio: float = 0.0001) -> np.ndarray:
     h, w = binary.shape
@@ -151,6 +151,176 @@ def _bfs_edges(
     return edges
 
 
+# ── YOLO detection ───────────────────────────────────────────────────────────
+
+def detect_openings(
+    model: YOLO,
+    color_bgr: np.ndarray,
+    conf: float = 0.25,
+    imgsz: int = 1024,
+) -> list[dict[str, Any]]:
+    """
+    Run YOLO on a cropped BGR color image.
+    Returns one dict per detection: {label, cx, cy, bbox (x1,y1,x2,y2), conf}.
+    Coordinates are in the same cropped space as the skeleton graph.
+    Only classes in OPENING_CLASSES are returned.
+    """
+    rgb = cv2.cvtColor(color_bgr, cv2.COLOR_BGR2RGB)
+    results = model(rgb, conf=conf, imgsz=imgsz, verbose=False)[0]
+    openings: list[dict[str, Any]] = []
+    for box in results.boxes:
+        label = model.names[int(box.cls)]
+        if label not in OPENING_CLASSES:
+            continue
+        x1, y1, x2, y2 = box.xyxy[0].tolist()
+        openings.append(dict(
+            label=label,
+            cx=(x1 + x2) / 2,
+            cy=(y1 + y2) / 2,
+            bbox=(x1, y1, x2, y2),
+            conf=float(box.conf),
+        ))
+    return openings
+
+
+def _gap_corners(G: nx.Graph, x1: float, y1: float, x2: float, y2: float) -> list[int]:
+    """
+    For each side of the bbox, find corner nodes within SNAP_PX.
+    When multiple candidates exist on the same side, keep the one closest
+    to that side's edge (left-side → smallest x; top-side → smallest y;
+    right-side → largest x; bottom-side → largest y).
+    Returns at most one node-id per side (up to 4 total, deduped).
+    """
+    sides: list[tuple[str, list[tuple[float, int]]]] = [
+        ("left",   []),
+        ("right",  []),
+        ("top",    []),
+        ("bottom", []),
+    ]
+
+    for n, attr in G.nodes(data=True):
+        if attr["kind"] != "corner":
+            continue
+        cx, cy = attr["x"], attr["y"]
+
+        if (x1 - SNAP_PX) <= cx <= (x1 + SNAP_PX) and (y1 - SNAP_PX) <= cy <= (y2 + SNAP_PX):
+            sides[0][1].append((cx, n))          # left: sort ascending → closest to x1
+        if (x2 - SNAP_PX) <= cx <= (x2 + SNAP_PX) and (y1 - SNAP_PX) <= cy <= (y2 + SNAP_PX):
+            sides[1][1].append((-cx, n))         # right: sort ascending → closest to x2 (largest cx)
+        if (y1 - SNAP_PX) <= cy <= (y1 + SNAP_PX) and (x1 - SNAP_PX) <= cx <= (x2 + SNAP_PX):
+            sides[2][1].append((cy, n))          # top: sort ascending → closest to y1
+        if (y2 - SNAP_PX) <= cy <= (y2 + SNAP_PX) and (x1 - SNAP_PX) <= cx <= (x2 + SNAP_PX):
+            sides[3][1].append((-cy, n))         # bottom: sort ascending → closest to y2 (largest cy)
+
+    selected: list[int] = []
+    seen: set[int] = set()
+    for _, candidates in sides:
+        if candidates:
+            candidates.sort()
+            nid = candidates[0][1]
+            if nid not in seen:
+                selected.append(nid)
+                seen.add(nid)
+    return selected
+
+
+def attach_openings(G: nx.Graph, openings: list[dict[str, Any]]) -> nx.Graph:
+    """
+    Add each opening as a new node and connect it to the wall-gap corners.
+
+    For each side of the bbox, the corner closest to that edge is selected
+    (so up to 2 corners for a straight door, one on each wall endpoint).
+    Edges span from those corners through the opening center, filling the gap.
+    Falls back to nearest corner if no corners are found near the bbox.
+    Mutates G in-place and returns it.
+    """
+    next_id = max(G.nodes()) + 1 if G.nodes() else 0
+    for det in openings:
+        x1, y1, x2, y2 = det["bbox"]
+        cx, cy = det["cx"], det["cy"]
+
+        gap = _gap_corners(G, x1, y1, x2, y2)
+
+        if not gap:
+            # fallback: nearest corner by Euclidean distance from center
+            best_node, best_d2 = None, float("inf")
+            for n, attr in G.nodes(data=True):
+                if attr["kind"] != "corner":
+                    continue
+                d2 = (attr["x"] - cx) ** 2 + (attr["y"] - cy) ** 2
+                if d2 < best_d2:
+                    best_d2, best_node = d2, n
+            gap = [best_node] if best_node is not None else []
+
+        G.add_node(next_id, x=cx, y=cy, kind=det["label"], bbox=det["bbox"], conf=det["conf"])
+        for nid in gap:
+            attr = G.nodes[nid]
+            dist = ((attr["x"] - cx) ** 2 + (attr["y"] - cy) ** 2) ** 0.5
+            G.add_edge(next_id, nid, length=dist, kind="opening")
+        next_id += 1
+    return G
+
+
+# ── JSON export ───────────────────────────────────────────────────────────────
+
+def graph_to_json(G: nx.Graph) -> dict[str, Any]:
+    """
+    Convert the combined graph to the structured output JSON.
+
+    Schema
+    ------
+    {
+      "walls":   [{"from":[x,y], "to":[x,y], "length":px}, ...],
+      "doors":   [{"center":[x,y], "bbox":[x1,y1,x2,y2],
+                   "conf":0.9, "connected_to":[[x,y],...],
+                   "touching_corners":[[x,y],...]},...],
+      "windows": [...same as doors...]
+    }
+    """
+    walls: list[dict] = []
+    doors: list[dict] = []
+    windows: list[dict] = []
+
+    for a, b, edata in G.edges(data=True):
+        if edata["kind"] == "wall":
+            walls.append({
+                "from":   [G.nodes[a]["x"], G.nodes[a]["y"]],
+                "to":     [G.nodes[b]["x"], G.nodes[b]["y"]],
+                "length": edata["length"],
+            })
+
+    for n, attr in G.nodes(data=True):
+        if attr["kind"] == "corner":
+            continue
+
+        nbrs = [nb for nb in G.neighbors(n) if G.nodes[nb]["kind"] == "corner"]
+        connected_to = [[G.nodes[nb]["x"], G.nodes[nb]["y"]] for nb in nbrs]
+
+        x1, y1, x2, y2 = attr["bbox"]
+        touching = [
+            [ca["x"], ca["y"]]
+            for _, ca in G.nodes(data=True)
+            if ca["kind"] == "corner"
+            and (x1 - SNAP_PX) <= ca["x"] <= (x2 + SNAP_PX)
+            and (y1 - SNAP_PX) <= ca["y"] <= (y2 + SNAP_PX)
+        ]
+
+        entry = {
+            "center":            [round(attr["x"], 1), round(attr["y"], 1)],
+            "bbox":              [round(v, 1) for v in (x1, y1, x2, y2)],
+            "conf":              round(attr["conf"], 3),
+            "connected_to":      connected_to,
+            "touching_corners":  touching,
+        }
+
+        if attr["kind"] in ("door", "2door"):
+            doors.append(entry)
+        elif attr["kind"] == "window":
+            windows.append(entry)
+
+    return {"walls": walls, "doors": doors, "windows": windows}
+
+
 # ── Public API ────────────────────────────────────────────────────────────────
 
 def build_skeleton_graph(
@@ -177,9 +347,10 @@ def build_skeleton_graph(
     -------
     SkeletonGraph with skeleton_raw, skeleton_thick, corners, and graph
     """
+    # Preprocessor already crops to content — skip the redundant second crop
+    # to keep skeleton coordinates in the same space as raw_no_text (for YOLO).
     binary = cv2.threshold(preprocessed, 127, 255, cv2.THRESH_BINARY)[1]
-    cropped = _crop_to_content(binary, margin=-10)
-    cleaned = _remove_noise(cropped, min_area_ratio=0.0001)
+    cleaned = _remove_noise(binary, min_area_ratio=0.0001)
     smoothed = _morphological_cleanup(cleaned, kernel_size=3)
 
     # Skeletonize
@@ -198,10 +369,10 @@ def build_skeleton_graph(
     edge_dict = _bfs_edges(snapped, skeleton_raw)
     G = nx.Graph()
     for cid, (x, y) in enumerate(snapped):
-        G.add_node(cid, x=x, y=y)
+        G.add_node(cid, x=x, y=y, kind="corner")
     for key, length in edge_dict.items():
         a, b = tuple(key)
-        G.add_edge(a, b, length=int(length))
+        G.add_edge(a, b, length=int(length), kind="wall")
 
     return SkeletonGraph(
         skeleton_raw=skeleton_raw,
@@ -213,53 +384,108 @@ def build_skeleton_graph(
 
 def run_pipeline(
     image: np.ndarray,
+    model_path: str | Path = "Models/best_v2.pt",
     preprocessor: FloorPlanPreprocessor | None = None,
-) -> tuple[PipelineResult, SkeletonGraph]:
-    """Run preprocessing (steps 1–3) then skeleton graph (step 4) on a BGR image."""
+    conf: float = 0.25,
+    imgsz: int = 1024,
+) -> FloorPlanOutput:
+    """
+    Run the full pipeline on a single BGR floor plan image.
+
+    Steps
+    -----
+    1–3  Text removal, binarisation, crop  (FloorPlanPreprocessor)
+    4    Skeleton → corner graph            (build_skeleton_graph)
+    5    YOLO door/window detection         (detect_openings)
+    6    Graph fusion + JSON export         (attach_openings, graph_to_json)
+
+    Parameters
+    ----------
+    image      : BGR numpy array
+    model_path : path to YOLO weights (.pt)
+    preprocessor : optional pre-instantiated FloorPlanPreprocessor
+    conf       : YOLO confidence threshold
+    imgsz      : YOLO inference size
+
+    Returns
+    -------
+    FloorPlanOutput with .prep, .skel, .graph, and .json
+    """
     if preprocessor is None:
         preprocessor = FloorPlanPreprocessor(angle_step=90)
+
     prep = preprocessor.process(image)
     skel = build_skeleton_graph(prep.preprocessed)
-    return prep, skel
+
+    model = YOLO(str(model_path))
+    openings = detect_openings(model, prep.raw_no_text, conf=conf, imgsz=imgsz)
+
+    # Work on a copy so skel.graph stays pure (corners + walls only)
+    combined = skel.graph.copy()
+    attach_openings(combined, openings)
+
+    return FloorPlanOutput(
+        prep=prep,
+        skel=skel,
+        graph=combined,
+        json=graph_to_json(combined),
+    )
 
 
 # ── CLI entry point ───────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    img_path = sys.argv[1] if len(sys.argv) > 1 else "data/PNG/raw/IIa_A01001.png"
+    img_path   = sys.argv[1] if len(sys.argv) > 1 else "data/PNG/raw/IIa_A01001.png"
+    model_path = sys.argv[2] if len(sys.argv) > 2 else "Models/best_v2.pt"
+
     image = cv2.imread(img_path)
     if image is None:
         raise FileNotFoundError(img_path)
 
-    prep, skel = run_pipeline(image)
+    out = run_pipeline(image, model_path=model_path)
+    G   = out.graph
 
-    G = skel.graph
-    print(f"rotation_angle : {prep.rotation_angle}°")
-    print(f"crop_bbox      : {prep.crop_bbox}")
-    print(f"corners        : {len(skel.corners)}")
+    print(f"rotation_angle : {out.prep.rotation_angle}°")
+    print(f"crop_bbox      : {out.prep.crop_bbox}")
+    print(f"corners        : {len(out.skel.corners)}")
+    print(f"walls          : {len(out.json['walls'])}")
+    print(f"doors          : {len(out.json['doors'])}")
+    print(f"windows        : {len(out.json['windows'])}")
     print(f"graph          : {G.number_of_nodes()} nodes, {G.number_of_edges()} edges")
-    print(f"components     : {nx.number_connected_components(G)}")
 
     out_dir = Path("data/PNG")
-    stem = Path(img_path).stem
+    stem    = Path(img_path).stem
 
     (out_dir / "no_text").mkdir(parents=True, exist_ok=True)
     (out_dir / "crop_and_pad").mkdir(parents=True, exist_ok=True)
 
-    cv2.imwrite(str(out_dir / "no_text" / f"{stem}.png"), prep.raw_no_text)
-    cv2.imwrite(str(out_dir / "crop_and_pad" / f"{stem}.png"), prep.preprocessed)
+    cv2.imwrite(str(out_dir / "no_text"      / f"{stem}.png"), out.prep.raw_no_text)
+    cv2.imwrite(str(out_dir / "crop_and_pad" / f"{stem}.png"), out.prep.preprocessed)
 
-    # Overlay graph on skeleton for visual inspection
-    vis = cv2.cvtColor(skel.skeleton_raw, cv2.COLOR_GRAY2BGR)
-    for a, b in G.edges():
-        pa = (G.nodes[a]["x"], G.nodes[a]["y"])
-        pb = (G.nodes[b]["x"], G.nodes[b]["y"])
-        cv2.line(vis, pa, pb, (0, 255, 0), 2)
+    # Overlay: skeleton + wall edges + opening bboxes
+    vis = cv2.cvtColor(out.skel.skeleton_raw, cv2.COLOR_GRAY2BGR)
+    COLORS = {"wall": (0, 255, 0), "opening": (0, 165, 255)}
+    for a, b, edata in G.edges(data=True):
+        pa = (int(G.nodes[a]["x"]), int(G.nodes[a]["y"]))
+        pb = (int(G.nodes[b]["x"]), int(G.nodes[b]["y"]))
+        cv2.line(vis, pa, pb, COLORS.get(edata["kind"], (200, 200, 200)), 2)
     for n, attr in G.nodes(data=True):
-        p = (attr["x"], attr["y"])
-        cv2.circle(vis, p, 6, (0, 0, 255), -1)
-        cv2.circle(vis, p, 6, (255, 255, 255), 2)
+        p = (int(attr["x"]), int(attr["y"]))
+        color = (0, 0, 255) if attr["kind"] == "corner" else (0, 165, 255)
+        cv2.circle(vis, p, 6, color, -1)
+        cv2.circle(vis, p, 6, (255, 255, 255), 1)
+        if "bbox" in attr:
+            x1, y1, x2, y2 = (int(v) for v in attr["bbox"])
+            cv2.rectangle(vis, (x1, y1), (x2, y2), (0, 165, 255), 2)
+            cv2.putText(vis, f"{attr['kind']} {attr['conf']:.2f}",
+                        (x1, y1 - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 165, 255), 1)
 
-    out_path = str(out_dir / f"{stem}_skeleton_graph.png")
-    cv2.imwrite(out_path, vis)
-    print(f"Saved graph overlay → {out_path}")
+    overlay_path = str(out_dir / f"{stem}_graph.png")
+    cv2.imwrite(overlay_path, vis)
+    print(f"Saved overlay  → {overlay_path}")
+
+    json_path = str(out_dir / f"{stem}.json")
+    with open(json_path, "w") as f:
+        json.dump(out.json, f, indent=2)
+    print(f"Saved JSON     → {json_path}")
+    print(json.dumps(out.json, indent=2))
