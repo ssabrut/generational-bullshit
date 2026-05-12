@@ -14,7 +14,7 @@
 #     Common names on macOS: en6, en7, en8 — varies by adapter.
 
 set -euo pipefail
-
+ 
 MASTER_ADDR="${MASTER_ADDR:?Set MASTER_ADDR to the LAN IP of the master node (mac1), e.g. 10.10.10.1}"
 MASTER_PORT="${MASTER_PORT:-12355}"
 NNODES="${NNODES:-3}"
@@ -36,14 +36,14 @@ if [ -z "${GLOO_IFNAME:-}" ]; then
     fi
 fi
 
+ERROR_FILE="/tmp/torchrun_rank${NODE_RANK}_error.json"
 echo "Starting node rank=${NODE_RANK} / ${NNODES} | master=${MASTER_ADDR}:${MASTER_PORT} | iface=${GLOO_IFNAME}"
+echo "Traceback (on failure): ${ERROR_FILE}"
 
-# GLOO_TRANSPORT=tcp  — avoids the libuv (uv) transport which crashes on macOS
-# GLOO_SOCKET_IFNAME  — pins gloo to the wired interface, not loopback or Wi-Fi
-# TP_SOCKET_IFNAME    — same for the tensorpipe rendezvous channel
 GLOO_TRANSPORT=tcp \
 GLOO_SOCKET_IFNAME="${GLOO_IFNAME}" \
 TP_SOCKET_IFNAME="${GLOO_IFNAME}" \
+TORCHELASTIC_ERROR_FILE="${ERROR_FILE}" \
 torchrun \
   --nproc_per_node="${NPROC_PER_NODE}" \
   --nnodes="${NNODES}" \
