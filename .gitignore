@@ -1,3 +1,12 @@
+# Data
+data/PNG/corners/
+data/PNG/crop_and_pad/
+data/PNG/junctions/
+data/PNG/no_text/
+data/PNG/preprocessed/
+data/PNG/skeleton_corners/
+data/pix3d/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
