@@ -22,8 +22,8 @@ IMAGENET_MEAN = [0.485, 0.456, 0.406]
 IMAGENET_STD  = [0.229, 0.224, 0.225]
 STAGE_WEIGHTS = [0.2, 0.3, 0.5]  # coarse → fine supervision
 def get_device():
-    if torch.backends.mps.is_available():
-        return torch.device("mps")
+    # if torch.backends.mps.is_available():
+    #     return torch.device("mps")
     return torch.device("cpu")
 
 DEVICE = get_device()
