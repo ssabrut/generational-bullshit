@@ -21,6 +21,11 @@ PIX3D_CATS = ["bed","bookcase","chair","desk","misc","sofa","table","tool","ward
 IMAGENET_MEAN = [0.485, 0.456, 0.406]
 IMAGENET_STD  = [0.229, 0.224, 0.225]
 STAGE_WEIGHTS = [0.2, 0.3, 0.5]  # coarse → fine supervision
+
+os.environ["OMP_NUM_THREADS"] = "1"
+os.environ["MKL_NUM_THREADS"] = "1"
+os.environ["OPENBLAS_NUM_THREADS"] = "1"
+
 def get_device():
     # if torch.backends.mps.is_available():
     #     return torch.device("mps")
