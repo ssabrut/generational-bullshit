@@ -34,7 +34,7 @@ def get_device():
 DEVICE = get_device()
 
 def setup():
-    dist.init_process_group(backend="gloo")
+    dist.init_process_group(backend="gloo", init_method="env://")
 
 def cleanup():
     dist.destroy_process_group()
