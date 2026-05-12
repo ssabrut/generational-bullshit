@@ -21,10 +21,14 @@ PIX3D_CATS = ["bed","bookcase","chair","desk","misc","sofa","table","tool","ward
 IMAGENET_MEAN = [0.485, 0.456, 0.406]
 IMAGENET_STD  = [0.229, 0.224, 0.225]
 STAGE_WEIGHTS = [0.2, 0.3, 0.5]  # coarse → fine supervision
-DEVICE = torch.device("cpu")
+def get_device():
+    if torch.backends.mps.is_available():
+        return torch.device("mps")
+    return torch.device("cpu")
+
+DEVICE = get_device()
 
 def setup():
-    # 'gloo' is the PyTorch backend for CPU distributed training
     dist.init_process_group(backend="gloo")
 
 def cleanup():
@@ -366,13 +370,15 @@ class Pix3DDataset(Dataset):
         focal = torch.tensor(a["focal_length"] / (max(w,h)/2.), dtype=torch.float32)
         return {"image": image, "gt_points": gt_pts, "rot": rot, "trans": trans, "focal": focal}
     
-def train(model, loader, optimizer, n_epochs=5, val_loader=None, vis_every=20, device=DEVICE):
+def train(model, loader, optimizer, n_epochs=5, val_loader=None, vis_every=20, device=DEVICE, train_sampler=None):
     history = {'train': [], 'val': []}
     step_losses, val_losses = [], []
     global_step = 0
 
     epoch_bar = tqdm(range(1, n_epochs + 1), desc='Epochs', unit='epoch')
     for epoch in epoch_bar:
+        if train_sampler is not None:
+            train_sampler.set_epoch(epoch)
         model.train()
         epoch_loss, t0 = 0.0, time.time()
 
@@ -463,43 +469,53 @@ def plot_history(history):
     plt.show()
 
 if __name__ == "__main__":
+    # Must be called before any distributed ops or DDP construction
+    setup()
+
+    rank = dist.get_rank()
+    world_size = dist.get_world_size()
+    device = get_device()
+
     PIX3D_ROOT = "data/pix3d"
     batch_size = 16
     num_workers = 0
+
     train_ds = Pix3DDataset(PIX3D_ROOT, "train", categories=["chair"])
-    val_ds = Pix3DDataset(PIX3D_ROOT, "val", categories=["chair"])
+    val_ds   = Pix3DDataset(PIX3D_ROOT, "val",   categories=["chair"])
 
     train_sampler = DistributedSampler(
-        train_ds,
-        num_replicas=3,
-        shuffle=True
+        train_ds, num_replicas=world_size, rank=rank, shuffle=True
     )
-
     val_sampler = DistributedSampler(
-        val_ds,
-        num_replicas=3,
-        shuffle=False
+        val_ds, num_replicas=world_size, rank=rank, shuffle=False
     )
 
-    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, num_workers=num_workers, sampler=train_sampler)
-    val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False, num_workers=num_workers, sampler=val_sampler)
+    # shuffle must be False when a sampler is provided
+    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=False, num_workers=num_workers, sampler=train_sampler)
+    val_loader   = DataLoader(val_ds,   batch_size=batch_size, shuffle=False, num_workers=num_workers, sampler=val_sampler)
 
-    encoder = ResNetEncoder(pretrained=True, freeze_stages=2).to(DEVICE)
-    model = DDP(Furniture3D(encoder=encoder, hidden_dim=256, n_stages=3, n_gcn_blocks=3).to(DEVICE))
-
+    encoder = ResNetEncoder(pretrained=True, freeze_stages=2).to(device)
+    model   = DDP(Furniture3D(encoder=encoder, hidden_dim=256, n_stages=3, n_gcn_blocks=3).to(device))
 
     optimizer = torch.optim.AdamW([
-        {"params": model.encoder.parameters(),  "lr": 3e-5},
-        {"params": [p for n,p in model.named_parameters() if "encoder" not in n], "lr": 3e-4},
+        {"params": model.module.encoder.parameters(), "lr": 3e-5},
+        {"params": [p for n, p in model.module.named_parameters() if "encoder" not in n], "lr": 3e-4},
     ], weight_decay=1e-4)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=100)
-    history = train(model, train_loader, optimizer, n_epochs=10, val_loader=val_loader)
-    cleanup()
 
-    # Simulated history for demo
-    demo_hist = {
-        "train": [5.0*np.exp(-0.06*e) + 0.1 + 0.04*np.random.randn() for e in range(60)],
-        "val":   [5.5*np.exp(-0.05*e) + 0.12+ 0.06*np.random.randn() for e in range(60)],
-    }
-    plot_history(demo_hist)
-    save_ckpt(model, optimizer, epoch=10, path="./furniture3d_smoke.pth")
+    history = train(
+        model, train_loader, optimizer,
+        n_epochs=10, val_loader=val_loader,
+        device=device, train_sampler=train_sampler,
+    )
+
+    # Only rank 0 saves checkpoints and plots
+    if rank == 0:
+        save_ckpt(model.module, optimizer, epoch=10, path="./furniture3d.pth")
+        demo_hist = {
+            "train": [5.0*np.exp(-0.06*e) + 0.1 + 0.04*np.random.randn() for e in range(60)],
+            "val":   [5.5*np.exp(-0.05*e) + 0.12+ 0.06*np.random.randn() for e in range(60)],
+        }
+        plot_history(demo_hist)
+
+    cleanup()
