@@ -1,5 +1,6 @@
 import time
 import os
+import datetime
 import random
 import torch
 import json
@@ -34,7 +35,19 @@ def get_device():
 DEVICE = get_device()
 
 def setup():
-    dist.init_process_group(backend="gloo", init_method="env://")
+    rank = int(os.environ["RANK"])
+    world_size = int(os.environ["WORLD_SIZE"])
+    master_addr = os.environ["MASTER_ADDR"]
+    master_port = os.environ["MASTER_PORT"]
+    print(f"[rank {rank}] init_process_group: world_size={world_size} master={master_addr}:{master_port}", flush=True)
+    dist.init_process_group(
+        backend="gloo",
+        init_method="env://",
+        rank=rank,
+        world_size=world_size,
+        timeout=datetime.timedelta(seconds=60),
+    )
+    print(f"[rank {rank}] process group ready", flush=True)
 
 def cleanup():
     dist.destroy_process_group()
