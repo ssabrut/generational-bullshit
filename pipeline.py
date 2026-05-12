@@ -579,6 +579,28 @@ def run_pipeline(
     )
 
 
+# Existing notebook logic lives in this module.
+# Keep detection, preprocessing, skeletonization, graph fusion, and JSON export here.
+# Only add thin wrappers in app.py or other API modules.
+def image_bytes_to_bgr(image_bytes: bytes) -> np.ndarray:
+    """Decode raw image bytes into a BGR OpenCV image."""
+    arr = np.frombuffer(image_bytes, np.uint8)
+    image = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+    if image is None:
+        raise ValueError("Invalid image bytes: unable to decode image.")
+    return image
+
+
+def process_floorplan_bytes(
+    image_bytes: bytes,
+    model_path: str | Path = "Models/best_v2.pt",
+    **kwargs,
+) -> dict[str, Any]:
+    """Process raw image bytes and return the exact pipeline JSON output."""
+    image = image_bytes_to_bgr(image_bytes)
+    return run_pipeline(image, model_path=model_path, **kwargs).json
+
+
 # ── CLI entry point ───────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
