@@ -1,0 +1,491 @@
+{
+  "walls": [
+    {
+      "id": "wall_1",
+      "start": {
+        "x": 823,
+        "y": 1352
+      },
+      "end": {
+        "x": 1154,
+        "y": 1348
+      }
+    },
+    {
+      "id": "wall_2",
+      "start": {
+        "x": 1159,
+        "y": 1116
+      },
+      "end": {
+        "x": 1394,
+        "y": 1113
+      }
+    },
+    {
+      "id": "wall_3",
+      "start": {
+        "x": 1159,
+        "y": 1116
+      },
+      "end": {
+        "x": 1154,
+        "y": 1348
+      }
+    },
+    {
+      "id": "wall_4",
+      "start": {
+        "x": 1394,
+        "y": 1113
+      },
+      "end": {
+        "x": 1394,
+        "y": 776
+      }
+    },
+    {
+      "id": "wall_5",
+      "start": {
+        "x": 751,
+        "y": 1036
+      },
+      "end": {
+        "x": 770,
+        "y": 413
+      }
+    },
+    {
+      "id": "wall_6",
+      "start": {
+        "x": 800,
+        "y": 779
+      },
+      "end": {
+        "x": 1394,
+        "y": 776
+      }
+    },
+    {
+      "id": "wall_7",
+      "start": {
+        "x": 400,
+        "y": 1057
+      },
+      "end": {
+        "x": 403,
+        "y": 375
+      }
+    },
+    {
+      "id": "wall_8",
+      "start": {
+        "x": 1394,
+        "y": 776
+      },
+      "end": {
+        "x": 1389,
+        "y": 413
+      }
+    },
+    {
+      "id": "wall_9",
+      "start": {
+        "x": 886,
+        "y": 659
+      },
+      "end": {
+        "x": 884,
+        "y": 413
+      }
+    },
+    {
+      "id": "wall_10",
+      "start": {
+        "x": 1129,
+        "y": 415
+      },
+      "end": {
+        "x": 884,
+        "y": 413
+      }
+    },
+    {
+      "id": "wall_11",
+      "start": {
+        "x": 823,
+        "y": 1352
+      },
+      "end": {
+        "x": 821,
+        "y": 1585
+      }
+    },
+    {
+      "id": "wall_12",
+      "start": {
+        "x": 821,
+        "y": 1585
+      },
+      "end": {
+        "x": 702,
+        "y": 1588
+      }
+    },
+    {
+      "id": "wall_13",
+      "start": {
+        "x": 796,
+        "y": 1230
+      },
+      "end": {
+        "x": 691,
+        "y": 1334
+      }
+    },
+    {
+      "id": "wall_14",
+      "start": {
+        "x": 423,
+        "y": 1173
+      },
+      "end": {
+        "x": 438,
+        "y": 1583
+      }
+    },
+    {
+      "id": "wall_15",
+      "start": {
+        "x": 438,
+        "y": 1583
+      },
+      "end": {
+        "x": 550,
+        "y": 1588
+      }
+    },
+    {
+      "id": "wall_16",
+      "start": {
+        "x": 438,
+        "y": 1583
+      },
+      "end": {
+        "x": 658,
+        "y": 1368
+      }
+    },
+    {
+      "id": "wall_17",
+      "start": {
+        "x": 874,
+        "y": 1151
+      },
+      "end": {
+        "x": 915,
+        "y": 1112
+      }
+    },
+    {
+      "id": "wall_18",
+      "start": {
+        "x": 915,
+        "y": 1112
+      },
+      "end": {
+        "x": 1154,
+        "y": 1348
+      }
+    },
+    {
+      "id": "wall_19",
+      "start": {
+        "x": 971,
+        "y": 834
+      },
+      "end": {
+        "x": 945,
+        "y": 860
+      }
+    },
+    {
+      "id": "wall_20",
+      "start": {
+        "x": 751,
+        "y": 1036
+      },
+      "end": {
+        "x": 427,
+        "y": 1039
+      }
+    },
+    {
+      "id": "wall_21",
+      "start": {
+        "x": 800,
+        "y": 779
+      },
+      "end": {
+        "x": 766,
+        "y": 1057
+      }
+    },
+    {
+      "id": "wall_22",
+      "start": {
+        "x": 438,
+        "y": 1071
+      },
+      "end": {
+        "x": 766,
+        "y": 1057
+      }
+    },
+    {
+      "id": "wall_23",
+      "start": {
+        "x": 431,
+        "y": 748
+      },
+      "end": {
+        "x": 402,
+        "y": 753
+      }
+    },
+    {
+      "id": "wall_24",
+      "start": {
+        "x": 1088,
+        "y": 452
+      },
+      "end": {
+        "x": 1072,
+        "y": 471
+      }
+    },
+    {
+      "id": "wall_25",
+      "start": {
+        "x": 1072,
+        "y": 471
+      },
+      "end": {
+        "x": 1071,
+        "y": 496
+      }
+    },
+    {
+      "id": "wall_26",
+      "start": {
+        "x": 1071,
+        "y": 496
+      },
+      "end": {
+        "x": 1085,
+        "y": 519
+      }
+    },
+    {
+      "id": "wall_27",
+      "start": {
+        "x": 1129,
+        "y": 415
+      },
+      "end": {
+        "x": 1129,
+        "y": 658
+      }
+    },
+    {
+      "id": "wall_28",
+      "start": {
+        "x": 1129,
+        "y": 415
+      },
+      "end": {
+        "x": 1389,
+        "y": 413
+      }
+    },
+    {
+      "id": "wall_29",
+      "start": {
+        "x": 770,
+        "y": 413
+      },
+      "end": {
+        "x": 802,
+        "y": 413
+      }
+    },
+    {
+      "id": "wall_30",
+      "start": {
+        "x": 802,
+        "y": 413
+      },
+      "end": {
+        "x": 849,
+        "y": 413
+      }
+    },
+    {
+      "id": "wall_31",
+      "start": {
+        "x": 849,
+        "y": 413
+      },
+      "end": {
+        "x": 884,
+        "y": 413
+      }
+    },
+    {
+      "id": "wall_32",
+      "start": {
+        "x": 400,
+        "y": 675
+      },
+      "end": {
+        "x": 423,
+        "y": 682
+      }
+    }
+  ],
+  "openings": [
+    {
+      "id": "opening_1",
+      "wallId": "wall_1",
+      "offset": 47.1,
+      "width": 116.8,
+      "type": "door"
+    },
+    {
+      "id": "opening_2",
+      "wallId": "wall_5",
+      "offset": 257.6,
+      "width": 121.7,
+      "type": "door"
+    },
+    {
+      "id": "opening_3",
+      "wallId": "wall_9",
+      "offset": 0.0,
+      "width": 102.5,
+      "type": "door"
+    },
+    {
+      "id": "opening_4",
+      "wallId": "wall_2",
+      "offset": 47.3,
+      "width": 119.6,
+      "type": "door"
+    },
+    {
+      "id": "opening_5",
+      "wallId": "wall_6",
+      "offset": 195.6,
+      "width": 118.0,
+      "type": "door"
+    },
+    {
+      "id": "opening_6",
+      "wallId": "wall_12",
+      "offset": 105.6,
+      "width": 13.5,
+      "type": "door"
+    },
+    {
+      "id": "opening_7",
+      "wallId": "wall_15",
+      "offset": 106.5,
+      "width": 5.6,
+      "type": "door"
+    },
+    {
+      "id": "opening_8",
+      "wallId": "wall_22",
+      "offset": 0.0,
+      "width": 105.4,
+      "type": "door"
+    },
+    {
+      "id": "opening_9",
+      "wallId": "wall_7",
+      "offset": 295.9,
+      "width": 89.0,
+      "type": "door"
+    },
+    {
+      "id": "opening_10",
+      "wallId": "wall_6",
+      "offset": 72.4,
+      "width": 149.6,
+      "type": "door"
+    },
+    {
+      "id": "opening_11",
+      "wallId": "wall_5",
+      "offset": 362.3,
+      "width": 261.0,
+      "type": "window"
+    },
+    {
+      "id": "opening_12",
+      "wallId": "wall_10",
+      "offset": 123.1,
+      "width": 77.8,
+      "type": "window"
+    },
+    {
+      "id": "opening_13",
+      "wallId": "wall_9",
+      "offset": 93.0,
+      "width": 122.9,
+      "type": "window"
+    },
+    {
+      "id": "opening_14",
+      "wallId": "wall_8",
+      "offset": 127.5,
+      "width": 103.0,
+      "type": "window"
+    },
+    {
+      "id": "opening_15",
+      "wallId": "wall_5",
+      "offset": 260.1,
+      "width": 109.5,
+      "type": "window"
+    },
+    {
+      "id": "opening_16",
+      "wallId": "wall_5",
+      "offset": 260.5,
+      "width": 109.2,
+      "type": "window"
+    },
+    {
+      "id": "opening_17",
+      "wallId": "wall_20",
+      "offset": 0.0,
+      "width": 324.0,
+      "type": "window"
+    },
+    {
+      "id": "opening_18",
+      "wallId": "wall_4",
+      "offset": 112.5,
+      "width": 104.0,
+      "type": "window"
+    },
+    {
+      "id": "opening_19",
+      "wallId": "wall_3",
+      "offset": 82.4,
+      "width": 103.1,
+      "type": "window"
+    }
+  ]
+}

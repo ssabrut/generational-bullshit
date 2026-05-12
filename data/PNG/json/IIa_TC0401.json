@@ -1,0 +1,528 @@
+{
+  "walls": [
+    {
+      "id": "wall_1",
+      "start": {
+        "x": 1438,
+        "y": 1793
+      },
+      "end": {
+        "x": 1446,
+        "y": 1412
+      }
+    },
+    {
+      "id": "wall_2",
+      "start": {
+        "x": 686,
+        "y": 1758
+      },
+      "end": {
+        "x": 689,
+        "y": 1468
+      }
+    },
+    {
+      "id": "wall_3",
+      "start": {
+        "x": 312,
+        "y": 1758
+      },
+      "end": {
+        "x": 302,
+        "y": 1360
+      }
+    },
+    {
+      "id": "wall_4",
+      "start": {
+        "x": 688,
+        "y": 1544
+      },
+      "end": {
+        "x": 688,
+        "y": 1242
+      }
+    },
+    {
+      "id": "wall_5",
+      "start": {
+        "x": 688,
+        "y": 1361
+      },
+      "end": {
+        "x": 688,
+        "y": 1068
+      }
+    },
+    {
+      "id": "wall_6",
+      "start": {
+        "x": 1447,
+        "y": 1145
+      },
+      "end": {
+        "x": 1447,
+        "y": 275
+      }
+    },
+    {
+      "id": "wall_7",
+      "start": {
+        "x": 1447,
+        "y": 1145
+      },
+      "end": {
+        "x": 1137,
+        "y": 1157
+      }
+    },
+    {
+      "id": "wall_8",
+      "start": {
+        "x": 313,
+        "y": 1049
+      },
+      "end": {
+        "x": 795,
+        "y": 1062
+      }
+    },
+    {
+      "id": "wall_9",
+      "start": {
+        "x": 1447,
+        "y": 275
+      },
+      "end": {
+        "x": 1116,
+        "y": 273
+      }
+    },
+    {
+      "id": "wall_10",
+      "start": {
+        "x": 1448,
+        "y": 1973
+      },
+      "end": {
+        "x": 1438,
+        "y": 2119
+      }
+    },
+    {
+      "id": "wall_11",
+      "start": {
+        "x": 1438,
+        "y": 2119
+      },
+      "end": {
+        "x": 1249,
+        "y": 2124
+      }
+    },
+    {
+      "id": "wall_12",
+      "start": {
+        "x": 686,
+        "y": 1758
+      },
+      "end": {
+        "x": 312,
+        "y": 1758
+      }
+    },
+    {
+      "id": "wall_13",
+      "start": {
+        "x": 312,
+        "y": 1758
+      },
+      "end": {
+        "x": 307,
+        "y": 1972
+      }
+    },
+    {
+      "id": "wall_14",
+      "start": {
+        "x": 307,
+        "y": 1972
+      },
+      "end": {
+        "x": 312,
+        "y": 2123
+      }
+    },
+    {
+      "id": "wall_15",
+      "start": {
+        "x": 312,
+        "y": 2123
+      },
+      "end": {
+        "x": 451,
+        "y": 2124
+      }
+    },
+    {
+      "id": "wall_16",
+      "start": {
+        "x": 799,
+        "y": 1634
+      },
+      "end": {
+        "x": 795,
+        "y": 1705
+      }
+    },
+    {
+      "id": "wall_17",
+      "start": {
+        "x": 795,
+        "y": 1705
+      },
+      "end": {
+        "x": 815,
+        "y": 1726
+      }
+    },
+    {
+      "id": "wall_18",
+      "start": {
+        "x": 815,
+        "y": 1726
+      },
+      "end": {
+        "x": 795,
+        "y": 1770
+      }
+    },
+    {
+      "id": "wall_19",
+      "start": {
+        "x": 795,
+        "y": 1770
+      },
+      "end": {
+        "x": 795,
+        "y": 2122
+      }
+    },
+    {
+      "id": "wall_20",
+      "start": {
+        "x": 795,
+        "y": 2122
+      },
+      "end": {
+        "x": 925,
+        "y": 2123
+      }
+    },
+    {
+      "id": "wall_21",
+      "start": {
+        "x": 795,
+        "y": 2122
+      },
+      "end": {
+        "x": 646,
+        "y": 2124
+      }
+    },
+    {
+      "id": "wall_22",
+      "start": {
+        "x": 310,
+        "y": 1529
+      },
+      "end": {
+        "x": 515,
+        "y": 1546
+      }
+    },
+    {
+      "id": "wall_23",
+      "start": {
+        "x": 515,
+        "y": 1546
+      },
+      "end": {
+        "x": 688,
+        "y": 1544
+      }
+    },
+    {
+      "id": "wall_24",
+      "start": {
+        "x": 1447,
+        "y": 1145
+      },
+      "end": {
+        "x": 1438,
+        "y": 1232
+      }
+    },
+    {
+      "id": "wall_25",
+      "start": {
+        "x": 685,
+        "y": 1041
+      },
+      "end": {
+        "x": 688,
+        "y": 1068
+      }
+    },
+    {
+      "id": "wall_26",
+      "start": {
+        "x": 313,
+        "y": 1049
+      },
+      "end": {
+        "x": 310,
+        "y": 1178
+      }
+    },
+    {
+      "id": "wall_27",
+      "start": {
+        "x": 776,
+        "y": 1028
+      },
+      "end": {
+        "x": 795,
+        "y": 1062
+      }
+    },
+    {
+      "id": "wall_28",
+      "start": {
+        "x": 795,
+        "y": 1062
+      },
+      "end": {
+        "x": 795,
+        "y": 1236
+      }
+    },
+    {
+      "id": "wall_29",
+      "start": {
+        "x": 1221,
+        "y": 904
+      },
+      "end": {
+        "x": 1223,
+        "y": 1145
+      }
+    },
+    {
+      "id": "wall_30",
+      "start": {
+        "x": 1221,
+        "y": 904
+      },
+      "end": {
+        "x": 776,
+        "y": 904
+      }
+    },
+    {
+      "id": "wall_31",
+      "start": {
+        "x": 1137,
+        "y": 1157
+      },
+      "end": {
+        "x": 1137,
+        "y": 1343
+      }
+    },
+    {
+      "id": "wall_32",
+      "start": {
+        "x": 1137,
+        "y": 1343
+      },
+      "end": {
+        "x": 872,
+        "y": 1347
+      }
+    },
+    {
+      "id": "wall_33",
+      "start": {
+        "x": 798,
+        "y": 1345
+      },
+      "end": {
+        "x": 872,
+        "y": 1347
+      }
+    },
+    {
+      "id": "wall_34",
+      "start": {
+        "x": 872,
+        "y": 1347
+      },
+      "end": {
+        "x": 872,
+        "y": 1526
+      }
+    },
+    {
+      "id": "wall_35",
+      "start": {
+        "x": 810,
+        "y": 272
+      },
+      "end": {
+        "x": 774,
+        "y": 274
+      }
+    },
+    {
+      "id": "wall_36",
+      "start": {
+        "x": 774,
+        "y": 274
+      },
+      "end": {
+        "x": 773,
+        "y": 774
+      }
+    }
+  ],
+  "openings": [
+    {
+      "id": "opening_1",
+      "wallId": "wall_7",
+      "offset": 104.7,
+      "width": 110.6,
+      "type": "door"
+    },
+    {
+      "id": "opening_2",
+      "wallId": "wall_4",
+      "offset": 207.9,
+      "width": 94.1,
+      "type": "door"
+    },
+    {
+      "id": "opening_3",
+      "wallId": "wall_30",
+      "offset": 341.2,
+      "width": 103.8,
+      "type": "door"
+    },
+    {
+      "id": "opening_4",
+      "wallId": "wall_4",
+      "offset": 74.2,
+      "width": 103.4,
+      "type": "door"
+    },
+    {
+      "id": "opening_5",
+      "wallId": "wall_2",
+      "offset": 107.5,
+      "width": 100.7,
+      "type": "door"
+    },
+    {
+      "id": "opening_6",
+      "wallId": "wall_16",
+      "offset": 7.5,
+      "width": 63.6,
+      "type": "door"
+    },
+    {
+      "id": "opening_7",
+      "wallId": "wall_34",
+      "offset": 176.9,
+      "width": 2.1,
+      "type": "door"
+    },
+    {
+      "id": "opening_8",
+      "wallId": "wall_33",
+      "offset": 0.0,
+      "width": 74.0,
+      "type": "door"
+    },
+    {
+      "id": "opening_9",
+      "wallId": "wall_3",
+      "offset": 116.5,
+      "width": 94.3,
+      "type": "door"
+    },
+    {
+      "id": "opening_10",
+      "wallId": "wall_30",
+      "offset": 360.7,
+      "width": 71.3,
+      "type": "door"
+    },
+    {
+      "id": "opening_11",
+      "wallId": "wall_6",
+      "offset": 78.5,
+      "width": 87.4,
+      "type": "door"
+    },
+    {
+      "id": "opening_12",
+      "wallId": "wall_9",
+      "offset": 103.1,
+      "width": 89.4,
+      "type": "door"
+    },
+    {
+      "id": "opening_13",
+      "wallId": "wall_1",
+      "offset": 139.4,
+      "width": 133.4,
+      "type": "door"
+    },
+    {
+      "id": "opening_14",
+      "wallId": "wall_27",
+      "offset": 0.0,
+      "width": 0.0,
+      "type": "window"
+    },
+    {
+      "id": "opening_15",
+      "wallId": "wall_8",
+      "offset": 387.3,
+      "width": 42.7,
+      "type": "window"
+    },
+    {
+      "id": "opening_16",
+      "wallId": "wall_8",
+      "offset": 381.8,
+      "width": 55.0,
+      "type": "window"
+    },
+    {
+      "id": "opening_17",
+      "wallId": "wall_5",
+      "offset": 124.5,
+      "width": 63.0,
+      "type": "window"
+    },
+    {
+      "id": "opening_18",
+      "wallId": "wall_13",
+      "offset": 136.0,
+      "width": 58.9,
+      "type": "window"
+    }
+  ]
+}

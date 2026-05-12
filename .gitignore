@@ -12,6 +12,7 @@ notebooks/model/test-2/
 
 #datasets
 data/SFPI/
+data/pix3d/
 
 # Distribution / packaging
 .Python

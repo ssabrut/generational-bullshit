@@ -1,0 +1,514 @@
+{
+  "walls": [
+    {
+      "id": "wall_1",
+      "start": {
+        "x": 605,
+        "y": 789
+      },
+      "end": {
+        "x": 594,
+        "y": 220
+      }
+    },
+    {
+      "id": "wall_2",
+      "start": {
+        "x": 594,
+        "y": 220
+      },
+      "end": {
+        "x": 920,
+        "y": 220
+      }
+    },
+    {
+      "id": "wall_3",
+      "start": {
+        "x": 569,
+        "y": 1291
+      },
+      "end": {
+        "x": 591,
+        "y": 1271
+      }
+    },
+    {
+      "id": "wall_4",
+      "start": {
+        "x": 591,
+        "y": 1271
+      },
+      "end": {
+        "x": 690,
+        "y": 1271
+      }
+    },
+    {
+      "id": "wall_5",
+      "start": {
+        "x": 690,
+        "y": 1271
+      },
+      "end": {
+        "x": 711,
+        "y": 1291
+      }
+    },
+    {
+      "id": "wall_6",
+      "start": {
+        "x": 1117,
+        "y": 992
+      },
+      "end": {
+        "x": 1092,
+        "y": 1011
+      }
+    },
+    {
+      "id": "wall_7",
+      "start": {
+        "x": 1092,
+        "y": 1011
+      },
+      "end": {
+        "x": 1092,
+        "y": 1054
+      }
+    },
+    {
+      "id": "wall_8",
+      "start": {
+        "x": 1092,
+        "y": 1269
+      },
+      "end": {
+        "x": 1015,
+        "y": 1271
+      }
+    },
+    {
+      "id": "wall_9",
+      "start": {
+        "x": 1092,
+        "y": 1269
+      },
+      "end": {
+        "x": 1092,
+        "y": 1054
+      }
+    },
+    {
+      "id": "wall_10",
+      "start": {
+        "x": 1015,
+        "y": 1271
+      },
+      "end": {
+        "x": 994,
+        "y": 1291
+      }
+    },
+    {
+      "id": "wall_11",
+      "start": {
+        "x": 1092,
+        "y": 1054
+      },
+      "end": {
+        "x": 1114,
+        "y": 1042
+      }
+    },
+    {
+      "id": "wall_12",
+      "start": {
+        "x": 357,
+        "y": 689
+      },
+      "end": {
+        "x": 466,
+        "y": 686
+      }
+    },
+    {
+      "id": "wall_13",
+      "start": {
+        "x": 320,
+        "y": 580
+      },
+      "end": {
+        "x": 238,
+        "y": 578
+      }
+    },
+    {
+      "id": "wall_14",
+      "start": {
+        "x": 238,
+        "y": 578
+      },
+      "end": {
+        "x": 236,
+        "y": 800
+      }
+    },
+    {
+      "id": "wall_15",
+      "start": {
+        "x": 238,
+        "y": 1271
+      },
+      "end": {
+        "x": 271,
+        "y": 1266
+      }
+    },
+    {
+      "id": "wall_16",
+      "start": {
+        "x": 238,
+        "y": 1271
+      },
+      "end": {
+        "x": 236,
+        "y": 800
+      }
+    },
+    {
+      "id": "wall_17",
+      "start": {
+        "x": 236,
+        "y": 800
+      },
+      "end": {
+        "x": 468,
+        "y": 797
+      }
+    },
+    {
+      "id": "wall_18",
+      "start": {
+        "x": 954,
+        "y": 541
+      },
+      "end": {
+        "x": 974,
+        "y": 562
+      }
+    },
+    {
+      "id": "wall_19",
+      "start": {
+        "x": 974,
+        "y": 562
+      },
+      "end": {
+        "x": 1090,
+        "y": 580
+      }
+    },
+    {
+      "id": "wall_20",
+      "start": {
+        "x": 1090,
+        "y": 580
+      },
+      "end": {
+        "x": 1092,
+        "y": 788
+      }
+    },
+    {
+      "id": "wall_21",
+      "start": {
+        "x": 1092,
+        "y": 828
+      },
+      "end": {
+        "x": 1112,
+        "y": 844
+      }
+    },
+    {
+      "id": "wall_22",
+      "start": {
+        "x": 1092,
+        "y": 828
+      },
+      "end": {
+        "x": 1092,
+        "y": 788
+      }
+    },
+    {
+      "id": "wall_23",
+      "start": {
+        "x": 228,
+        "y": 476
+      },
+      "end": {
+        "x": 236,
+        "y": 417
+      }
+    },
+    {
+      "id": "wall_24",
+      "start": {
+        "x": 249,
+        "y": 487
+      },
+      "end": {
+        "x": 383,
+        "y": 472
+      }
+    },
+    {
+      "id": "wall_25",
+      "start": {
+        "x": 383,
+        "y": 472
+      },
+      "end": {
+        "x": 470,
+        "y": 456
+      }
+    },
+    {
+      "id": "wall_26",
+      "start": {
+        "x": 228,
+        "y": 311
+      },
+      "end": {
+        "x": 236,
+        "y": 223
+      }
+    },
+    {
+      "id": "wall_27",
+      "start": {
+        "x": 236,
+        "y": 223
+      },
+      "end": {
+        "x": 594,
+        "y": 220
+      }
+    },
+    {
+      "id": "wall_28",
+      "start": {
+        "x": 708,
+        "y": 220
+      },
+      "end": {
+        "x": 729,
+        "y": 240
+      }
+    },
+    {
+      "id": "wall_29",
+      "start": {
+        "x": 827,
+        "y": 195
+      },
+      "end": {
+        "x": 825,
+        "y": 222
+      }
+    },
+    {
+      "id": "wall_30",
+      "start": {
+        "x": 825,
+        "y": 222
+      },
+      "end": {
+        "x": 851,
+        "y": 220
+      }
+    },
+    {
+      "id": "wall_31",
+      "start": {
+        "x": 974,
+        "y": 222
+      },
+      "end": {
+        "x": 920,
+        "y": 220
+      }
+    },
+    {
+      "id": "wall_32",
+      "start": {
+        "x": 974,
+        "y": 222
+      },
+      "end": {
+        "x": 1101,
+        "y": 211
+      }
+    },
+    {
+      "id": "wall_33",
+      "start": {
+        "x": 974,
+        "y": 222
+      },
+      "end": {
+        "x": 974,
+        "y": 366
+      }
+    },
+    {
+      "id": "wall_34",
+      "start": {
+        "x": 974,
+        "y": 426
+      },
+      "end": {
+        "x": 997,
+        "y": 435
+      }
+    },
+    {
+      "id": "wall_35",
+      "start": {
+        "x": 974,
+        "y": 426
+      },
+      "end": {
+        "x": 974,
+        "y": 366
+      }
+    },
+    {
+      "id": "wall_36",
+      "start": {
+        "x": 920,
+        "y": 220
+      },
+      "end": {
+        "x": 918,
+        "y": 194
+      }
+    }
+  ],
+  "openings": [
+    {
+      "id": "opening_1",
+      "wallId": "wall_1",
+      "offset": 223.3,
+      "width": 106.7,
+      "type": "door"
+    },
+    {
+      "id": "opening_2",
+      "wallId": "wall_25",
+      "offset": 41.5,
+      "width": 46.9,
+      "type": "door"
+    },
+    {
+      "id": "opening_3",
+      "wallId": "wall_1",
+      "offset": 323.2,
+      "width": 107.9,
+      "type": "door"
+    },
+    {
+      "id": "opening_4",
+      "wallId": "wall_18",
+      "offset": 0.0,
+      "width": 17.7,
+      "type": "door"
+    },
+    {
+      "id": "opening_5",
+      "wallId": "wall_2",
+      "offset": 123.9,
+      "width": 115.0,
+      "type": "door"
+    },
+    {
+      "id": "opening_6",
+      "wallId": "wall_24",
+      "offset": 73.3,
+      "width": 61.6,
+      "type": "door"
+    },
+    {
+      "id": "opening_7",
+      "wallId": "wall_2",
+      "offset": 138.9,
+      "width": 90.3,
+      "type": "window"
+    },
+    {
+      "id": "opening_8",
+      "wallId": "wall_32",
+      "offset": 140.6,
+      "width": 0.0,
+      "type": "window"
+    },
+    {
+      "id": "opening_9",
+      "wallId": "wall_26",
+      "offset": 0.0,
+      "width": 0.0,
+      "type": "window"
+    },
+    {
+      "id": "opening_10",
+      "wallId": "wall_26",
+      "offset": 0.0,
+      "width": 0.0,
+      "type": "window"
+    },
+    {
+      "id": "opening_11",
+      "wallId": "wall_26",
+      "offset": 0.0,
+      "width": 0.0,
+      "type": "window"
+    },
+    {
+      "id": "opening_12",
+      "wallId": "wall_18",
+      "offset": 0.0,
+      "width": 29.0,
+      "type": "window"
+    },
+    {
+      "id": "opening_13",
+      "wallId": "wall_24",
+      "offset": 0.0,
+      "width": 0.0,
+      "type": "window"
+    },
+    {
+      "id": "opening_14",
+      "wallId": "wall_24",
+      "offset": 0.0,
+      "width": 0.0,
+      "type": "window"
+    },
+    {
+      "id": "opening_15",
+      "wallId": "wall_24",
+      "offset": 0.0,
+      "width": 10.7,
+      "type": "window"
+    },
+    {
+      "id": "opening_16",
+      "wallId": "wall_21",
+      "offset": 6.0,
+      "width": 5.2,
+      "type": "window"
+    }
+  ]
+}
