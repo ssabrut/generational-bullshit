@@ -36,18 +36,17 @@ if [ -z "${GLOO_IFNAME:-}" ]; then
     fi
 fi
 
-ERROR_FILE="/tmp/torchrun_rank${NODE_RANK}_error.json"
-echo "Starting node rank=${NODE_RANK} / ${NNODES} | master=${MASTER_ADDR}:${MASTER_PORT} | iface=${GLOO_IFNAME}"
-echo "Traceback (on failure): ${ERROR_FILE}"
+WORLD_SIZE=$(( NNODES * NPROC_PER_NODE ))
+RANK="${NODE_RANK}"
+
+echo "Starting node rank=${RANK} / world_size=${WORLD_SIZE} | master=${MASTER_ADDR}:${MASTER_PORT} | iface=${GLOO_IFNAME}"
 
 GLOO_TRANSPORT=tcp \
 GLOO_SOCKET_IFNAME="${GLOO_IFNAME}" \
 TP_SOCKET_IFNAME="${GLOO_IFNAME}" \
-TORCHELASTIC_ERROR_FILE="${ERROR_FILE}" \
-torchrun \
-  --nproc_per_node="${NPROC_PER_NODE}" \
-  --nnodes="${NNODES}" \
-  --node_rank="${NODE_RANK}" \
-  --master_addr="${MASTER_ADDR}" \
-  --master_port="${MASTER_PORT}" \
-  scripts/train.py
+MASTER_ADDR="${MASTER_ADDR}" \
+MASTER_PORT="${MASTER_PORT}" \
+WORLD_SIZE="${WORLD_SIZE}" \
+RANK="${RANK}" \
+LOCAL_RANK="0" \
+python scripts/train.py
