@@ -15,6 +15,7 @@ from skimage.morphology import skeletonize
 from ultralytics import YOLO
 
 from preprocessing import FloorPlanPreprocessor, PipelineResult
+from window_detect import detect_windows_fm
 
 OPENING_CLASSES = {"door", "2door", "window"}
 SNAP_PX = 20  # bbox proximity (px) to count a corner as "touching" an opening
@@ -228,10 +229,11 @@ def attach_openings(G: nx.Graph, openings: list[dict[str, Any]]) -> nx.Graph:
     """
     Add each opening as a new node and connect it to the wall-gap corners.
 
-    For each side of the bbox, the corner closest to that edge is selected
-    (so up to 2 corners for a straight door, one on each wall endpoint).
-    Edges span from those corners through the opening center, filling the gap.
-    Falls back to nearest corner if no corners are found near the bbox.
+    When two or more gap corners are found, a single direct edge is drawn
+    between the first pair of corners (no routing through the center node).
+    The center node is kept for JSON metadata but carries no graph edges in
+    this case.  Falls back to center-connected edges when fewer than 2
+    gap corners are found.
     Mutates G in-place and returns it.
     """
     next_id = max(G.nodes()) + 1 if G.nodes() else 0
@@ -253,15 +255,74 @@ def attach_openings(G: nx.Graph, openings: list[dict[str, Any]]) -> nx.Graph:
             gap = [best_node] if best_node is not None else []
 
         G.add_node(next_id, x=cx, y=cy, kind=det["label"], bbox=det["bbox"], conf=det["conf"])
-        for nid in gap:
-            attr = G.nodes[nid]
-            dist = ((attr["x"] - cx) ** 2 + (attr["y"] - cy) ** 2) ** 0.5
-            G.add_edge(next_id, nid, length=dist, kind="opening")
+
+        if len(gap) >= 2:
+            # Direct corner-to-corner edge; opening_node links back to metadata
+            a, b = gap[0], gap[1]
+            dist = ((G.nodes[a]["x"] - G.nodes[b]["x"]) ** 2 +
+                    (G.nodes[a]["y"] - G.nodes[b]["y"]) ** 2) ** 0.5
+            G.add_edge(a, b, length=dist, kind="opening", opening_node=next_id)
+        else:
+            for nid in gap:
+                attr = G.nodes[nid]
+                dist = ((attr["x"] - cx) ** 2 + (attr["y"] - cy) ** 2) ** 0.5
+                G.add_edge(next_id, nid, length=dist, kind="opening")
+
         next_id += 1
     return G
 
 
 # ── JSON export ───────────────────────────────────────────────────────────────
+
+def _opening_offset_and_width(
+    bbox: tuple,
+    wx1: float, wy1: float,
+    wx2: float, wy2: float,
+) -> tuple[float, float]:
+    """
+    Project an opening bbox onto a wall line segment.
+
+    Returns (offset, width) where:
+      offset = distance from wall start to the near edge of the opening
+      width  = length of the opening along the wall direction
+    Both values are clamped to [0, wall_length].
+    """
+    x1, y1, x2, y2 = bbox
+    dx, dy   = wx2 - wx1, wy2 - wy1
+    wall_len = (dx ** 2 + dy ** 2) ** 0.5
+    if wall_len == 0:
+        return 0.0, 0.0
+    ux, uy = dx / wall_len, dy / wall_len
+    # project all four bbox corners onto the wall direction
+    ts = [
+        (cx - wx1) * ux + (cy - wy1) * uy
+        for cx, cy in [(x1, y1), (x2, y1), (x1, y2), (x2, y2)]
+    ]
+    t_min = max(0.0, min(ts))
+    t_max = min(wall_len, max(ts))
+    return round(t_min, 1), round(max(0.0, t_max - t_min), 1)
+
+
+def _nearest_wall_id(
+    cx: float, cy: float,
+    wall_records: list[dict],
+) -> str | None:
+    """Return the id of the wall whose line is closest to (cx, cy)."""
+    best_id, best_d = None, float("inf")
+    for w in wall_records:
+        wx1, wy1, wx2, wy2 = w["_x1"], w["_y1"], w["_x2"], w["_y2"]
+        dx, dy = wx2 - wx1, wy2 - wy1
+        lsq = dx * dx + dy * dy
+        if lsq == 0:
+            continue
+        t   = max(0.0, min(1.0, ((cx - wx1) * dx + (cy - wy1) * dy) / lsq))
+        px  = wx1 + t * dx
+        py  = wy1 + t * dy
+        d   = ((cx - px) ** 2 + (cy - py) ** 2) ** 0.5
+        if d < best_d:
+            best_d, best_id = d, w["id"]
+    return best_id
+
 
 def graph_to_json(G: nx.Graph) -> dict[str, Any]:
     """
@@ -270,55 +331,133 @@ def graph_to_json(G: nx.Graph) -> dict[str, Any]:
     Schema
     ------
     {
-      "walls":   [{"from":[x,y], "to":[x,y], "length":px}, ...],
-      "doors":   [{"center":[x,y], "bbox":[x1,y1,x2,y2],
-                   "conf":0.9, "connected_to":[[x,y],...],
-                   "touching_corners":[[x,y],...]},...],
-      "windows": [...same as doors...]
+      "walls": [
+        {"id": "wall_N", "start": {"x": px, "y": px}, "end": {"x": px, "y": px}},
+        ...
+      ],
+      "openings": [
+        {"id": "opening_N", "wallId": "wall_N",
+         "offset": px, "width": px, "type": "door"|"window"},
+        ...
+      ]
     }
-    """
-    walls: list[dict] = []
-    doors: list[dict] = []
-    windows: list[dict] = []
 
+    Wall-merging: collinear wall segments on either side of an opening are
+    merged into one span (≤30° tolerance).  Each opening is then referenced
+    by wallId + offset so consumers can place it precisely on the wall.
+    """
+    # ── collect direct opening edges (corner-to-corner) ───────────────────────
+    opening_edges: list[tuple[int, int, int]] = [
+        (a, b, edata["opening_node"])
+        for a, b, edata in G.edges(data=True)
+        if edata.get("kind") == "opening" and "opening_node" in edata
+    ]
+
+    # ── wall merging ──────────────────────────────────────────────────────────
+    absorbed: set[frozenset] = set()
+    wall_records: list[dict] = []   # internal dicts with _x1/_y1/_x2/_y2 for math
+    node_to_wall: dict[int, str] = {}  # opening_node_id → wall_id
+    wall_idx = 0
+
+    for ca, cb, nid in opening_edges:
+        def _wall_nbrs(node: int) -> list[int]:
+            return [
+                nb for nb in G.neighbors(node)
+                if G.nodes[nb]["kind"] == "corner"
+                and G[node][nb].get("kind") == "wall"
+            ]
+
+        nbrs_a = _wall_nbrs(ca)
+        nbrs_b = _wall_nbrs(cb)
+        if not nbrs_a or not nbrs_b:
+            continue
+
+        dx_gap  = G.nodes[cb]["x"] - G.nodes[ca]["x"]
+        dy_gap  = G.nodes[cb]["y"] - G.nodes[ca]["y"]
+        gap_len = (dx_gap ** 2 + dy_gap ** 2) ** 0.5 or 1.0
+
+        def _best(node: int, nbrs: list[int]) -> int | None:
+            best_n, best_s = None, -1.0
+            for nb in nbrs:
+                dx = G.nodes[node]["x"] - G.nodes[nb]["x"]
+                dy = G.nodes[node]["y"] - G.nodes[nb]["y"]
+                seg_len = (dx ** 2 + dy ** 2) ** 0.5 or 1.0
+                score   = abs((dx / seg_len) * (dx_gap / gap_len) +
+                              (dy / seg_len) * (dy_gap / gap_len))
+                if score > best_s:
+                    best_s, best_n = score, nb
+            return best_n if best_s > 0.85 else None
+
+        p = _best(ca, nbrs_a)
+        q = _best(cb, nbrs_b)
+        if p is None or q is None:
+            continue
+
+        absorbed.add(frozenset({ca, p}))
+        absorbed.add(frozenset({cb, q}))
+
+        wall_idx += 1
+        wid = f"wall_{wall_idx}"
+        px, py = G.nodes[p]["x"], G.nodes[p]["y"]
+        qx, qy = G.nodes[q]["x"], G.nodes[q]["y"]
+        wall_records.append({
+            "id":    wid,
+            "start": {"x": px, "y": py},
+            "end":   {"x": qx, "y": qy},
+            "_x1": px, "_y1": py, "_x2": qx, "_y2": qy,
+        })
+        node_to_wall[nid] = wid
+
+    # ── remaining (non-absorbed) wall edges ───────────────────────────────────
     for a, b, edata in G.edges(data=True):
-        if edata["kind"] == "wall":
-            walls.append({
-                "from":   [G.nodes[a]["x"], G.nodes[a]["y"]],
-                "to":     [G.nodes[b]["x"], G.nodes[b]["y"]],
-                "length": edata["length"],
+        if edata.get("kind") == "wall" and frozenset({a, b}) not in absorbed:
+            wall_idx += 1
+            wid = f"wall_{wall_idx}"
+            ax, ay = G.nodes[a]["x"], G.nodes[a]["y"]
+            bx, by = G.nodes[b]["x"], G.nodes[b]["y"]
+            wall_records.append({
+                "id":    wid,
+                "start": {"x": ax, "y": ay},
+                "end":   {"x": bx, "y": by},
+                "_x1": ax, "_y1": ay, "_x2": bx, "_y2": by,
             })
+
+    # ── openings ──────────────────────────────────────────────────────────────
+    wall_by_id = {w["id"]: w for w in wall_records}
+    openings: list[dict] = []
+    opening_idx = 0
 
     for n, attr in G.nodes(data=True):
         if attr["kind"] == "corner":
             continue
 
-        nbrs = [nb for nb in G.neighbors(n) if G.nodes[nb]["kind"] == "corner"]
-        connected_to = [[G.nodes[nb]["x"], G.nodes[nb]["y"]] for nb in nbrs]
-
+        cx, cy      = attr["x"], attr["y"]
         x1, y1, x2, y2 = attr["bbox"]
-        touching = [
-            [ca["x"], ca["y"]]
-            for _, ca in G.nodes(data=True)
-            if ca["kind"] == "corner"
-            and (x1 - SNAP_PX) <= ca["x"] <= (x2 + SNAP_PX)
-            and (y1 - SNAP_PX) <= ca["y"] <= (y2 + SNAP_PX)
-        ]
 
-        entry = {
-            "center":            [round(attr["x"], 1), round(attr["y"], 1)],
-            "bbox":              [round(v, 1) for v in (x1, y1, x2, y2)],
-            "conf":              round(attr["conf"], 3),
-            "connected_to":      connected_to,
-            "touching_corners":  touching,
-        }
+        # prefer the wall this opening was merged into; fall back to nearest
+        wid = node_to_wall.get(n) or _nearest_wall_id(cx, cy, wall_records)
+        if wid is None:
+            continue
 
-        if attr["kind"] in ("door", "2door"):
-            doors.append(entry)
-        elif attr["kind"] == "window":
-            windows.append(entry)
+        w = wall_by_id[wid]
+        offset, width = _opening_offset_and_width(
+            (x1, y1, x2, y2),
+            w["_x1"], w["_y1"], w["_x2"], w["_y2"],
+        )
 
-    return {"walls": walls, "doors": doors, "windows": windows}
+        opening_idx += 1
+        kind = "door" if attr["kind"] in ("door", "2door") else "window"
+        openings.append({
+            "id":     f"opening_{opening_idx}",
+            "wallId": wid,
+            "offset": offset,
+            "width":  width,
+            "type":   kind,
+        })
+
+    # strip internal geometry keys before returning
+    walls = [{"id": w["id"], "start": w["start"], "end": w["end"]} for w in wall_records]
+    return {"walls": walls, "openings": openings}
 
 
 # ── Public API ────────────────────────────────────────────────────────────────
@@ -420,6 +559,14 @@ def run_pipeline(
     model = YOLO(str(model_path))
     openings = detect_openings(model, prep.raw_no_text, conf=conf, imgsz=imgsz)
 
+    # Supplement YOLO with feature-matching window detection.
+    # YOLO doors always win: pass all YOLO bboxes as suppression mask so any
+    # FM window candidate overlapping a YOLO detection is dropped.
+    gray = cv2.cvtColor(prep.raw_no_text, cv2.COLOR_BGR2GRAY)
+    yolo_bboxes = [det["bbox"] for det in openings]
+    fm_windows = detect_windows_fm(gray, existing_bboxes=yolo_bboxes)
+    openings = openings + fm_windows   # YOLO first (higher conf / priority)
+
     # Work on a copy so skel.graph stays pure (corners + walls only)
     combined = skel.graph.copy()
     attach_openings(combined, openings)
@@ -445,12 +592,14 @@ if __name__ == "__main__":
     out = run_pipeline(image, model_path=model_path)
     G   = out.graph
 
+    n_doors   = sum(1 for o in out.json["openings"] if o["type"] == "door")
+    n_windows = sum(1 for o in out.json["openings"] if o["type"] == "window")
     print(f"rotation_angle : {out.prep.rotation_angle}°")
     print(f"crop_bbox      : {out.prep.crop_bbox}")
     print(f"corners        : {len(out.skel.corners)}")
     print(f"walls          : {len(out.json['walls'])}")
-    print(f"doors          : {len(out.json['doors'])}")
-    print(f"windows        : {len(out.json['windows'])}")
+    print(f"doors          : {n_doors}")
+    print(f"windows        : {n_windows}")
     print(f"graph          : {G.number_of_nodes()} nodes, {G.number_of_edges()} edges")
 
     out_dir = Path("data/PNG")
