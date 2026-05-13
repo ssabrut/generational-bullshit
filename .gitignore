@@ -11,6 +11,9 @@ runs/
 notebooks/model/test-2/
 GAN/exports/
 
+# large model weights (exceed GitHub 100MB limit)
+GAN/*.pt
+
 #datasets
 data/SFPI/
 data/pix3d/
