@@ -1,13 +1,19 @@
 import os
 import torch
 import torch.distributed as dist
+import datetime
 import torch.nn as nn
 from torch.nn.parallel import DistributedDataParallel as DDP
 
 def setup():
+    print(f"MASTER_ADDR: {os.environ.get['MASTER_ADDR']}")
+    print(f"MASTER_PORT: {os.environ.get['MASTER_PORT']}")
+    print(f"RANK: {os.environ.get['RANK']}")
+    print(f"WORLD_SIZE: {os.environ.get['WORLD_SIZE']}")
     dist.init_process_group(
         backend="gloo",         # CPU backend
-        init_method="env://"   # reads MASTER_ADDR, MASTER_PORT, RANK, WORLD_SIZE
+        init_method="env://",   # reads MASTER_ADDR, MASTER_PORT, RANK, WORLD_SIZE
+        timeout=datetime.timedelta(seconds=30)
     )
 
 def cleanup():
