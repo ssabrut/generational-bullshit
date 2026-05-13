@@ -9,6 +9,7 @@ __pycache__/
 # logs
 runs/
 notebooks/model/test-2/
+GAN/exports/
 
 #datasets
 data/SFPI/
