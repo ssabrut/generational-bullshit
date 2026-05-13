@@ -438,7 +438,8 @@ def compute_loss(pred_verts, gt_pts, faces, lap, w_cd=1.0, w_edge=0.1, w_lap=0.5
 
 def train(model, train_loader, val_loader, optimizer, scheduler, epochs, device, rank, world_size):
     scaler = torch.cuda.amp.GradScaler() if torch.cuda.is_available() else None
-    stage_weights = get_stage_weights(model.n_stages, STAGE_WEIGHTS)
+    model_n_stages = model.module.n_stages if isinstance(model, DDP) else model.n_stages
+    stage_weights = get_stage_weights(model_n_stages, STAGE_WEIGHTS)
 
     if rank == 0:
         print(f"Starting training for {epochs} epochs on rank {rank}")
@@ -545,7 +546,7 @@ def get_stage_weights(n_stages, base_weights=None):
 
 def main():
     parser = argparse.ArgumentParser(description="Distributed training for Pixel2Mesh with DINOv2")
-    parser.add_argument("--pix3d-root", type=str, default="../data/pix3d", help="Path to Pix3D dataset")
+    parser.add_argument("--pix3d-root", type=str, default="data/pix3d", help="Path to Pix3D dataset")
     parser.add_argument("--batch-size", type=int, default=16, help="Batch size per GPU")
     parser.add_argument("--epochs", type=int, default=100, help="Number of epochs")
     parser.add_argument("--lr-fpn", type=float, default=1e-4, help="Learning rate for FPN")
