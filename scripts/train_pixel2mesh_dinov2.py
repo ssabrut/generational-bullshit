@@ -24,6 +24,7 @@ STAGE_WEIGHTS = [0.2, 0.3, 0.5]
 
 
 def setup_distributed():
+    # Use existing env vars or set defaults
     if "MASTER_ADDR" not in os.environ:
         os.environ["MASTER_ADDR"] = "localhost"
     if "MASTER_PORT" not in os.environ:
@@ -33,13 +34,20 @@ def setup_distributed():
     if "WORLD_SIZE" not in os.environ:
         os.environ["WORLD_SIZE"] = "1"
 
+    # GLOO_SOCKET_IFNAME is optional for network interface selection
+    if "GLOO_SOCKET_IFNAME" in os.environ:
+        print(f"GLOO_SOCKET_IFNAME: {os.environ.get('GLOO_SOCKET_IFNAME')}")
+
     print(f"MASTER_ADDR: {os.environ.get('MASTER_ADDR')}")
     print(f"MASTER_PORT: {os.environ.get('MASTER_PORT')}")
     print(f"RANK: {os.environ.get('RANK')}")
     print(f"WORLD_SIZE: {os.environ.get('WORLD_SIZE')}")
 
+    backend = "gloo" if not torch.cuda.is_available() else "nccl"
+    print(f"Using backend: {backend}")
+
     dist.init_process_group(
-        backend="gloo" if not torch.cuda.is_available() else "nccl",
+        backend=backend,
         init_method="env://",
         timeout=datetime.timedelta(seconds=30)
     )

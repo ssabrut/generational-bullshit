@@ -41,7 +41,7 @@ Where:
 - `100` = number of epochs
 - `../data/pix3d` = path to Pix3D dataset
 
-### Manual Distributed Launch
+### Manual Distributed Launch with torch.distributed.launch
 ```bash
 cd scripts
 export MASTER_ADDR=localhost
@@ -53,6 +53,36 @@ python -m torch.distributed.launch \
     --batch-size 16 \
     --epochs 100
 ```
+
+### Manual Environment Variables (Custom Network/Cluster)
+You can directly set distributed training environment variables without using torch.distributed.launch:
+
+**Node 0 (Master):**
+```bash
+cd scripts
+MASTER_ADDR=192.168.1.10 MASTER_PORT=29500 RANK=0 WORLD_SIZE=2 GLOO_SOCKET_IFNAME=en7 \
+python train_pixel2mesh_dinov2.py \
+    --pix3d-root ../data/pix3d \
+    --batch-size 16 \
+    --epochs 100
+```
+
+**Node 1 (Worker):**
+```bash
+cd scripts
+MASTER_ADDR=192.168.1.10 MASTER_PORT=29500 RANK=1 WORLD_SIZE=2 GLOO_SOCKET_IFNAME=en7 \
+python train_pixel2mesh_dinov2.py \
+    --pix3d-root ../data/pix3d \
+    --batch-size 16 \
+    --epochs 100
+```
+
+Where:
+- `MASTER_ADDR` - IP address of the master node
+- `MASTER_PORT` - Port for communication (must be open between nodes)
+- `RANK` - Process rank (0 for master, 1,2,... for workers)
+- `WORLD_SIZE` - Total number of processes
+- `GLOO_SOCKET_IFNAME` - Network interface to use (e.g., en7, eth0)
 
 ## Command Line Arguments
 
