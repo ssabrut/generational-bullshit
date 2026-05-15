@@ -455,10 +455,9 @@ def main():
     print(f"  Model type: {'DINOv2-GCN (fine-tuned)' if use_dinov2 else 'VGG-GCN (pretrained)'}")
 
     if use_dinov2:
-        # import here to avoid loading torch.hub at module level
         import sys
         sys.path.insert(0, os.path.dirname(__file__))
-        from train_pix2mesh_chair import Pixel2MeshDINO
+        from train_pix2mesh_chair import Pixel2MeshDINO, compute_median_camera
 
         model = Pixel2MeshDINO()
         ckpt  = torch.load(args.weights, map_location=device, weights_only=False)
@@ -466,10 +465,19 @@ def main():
         print(f"  Loaded epoch {ckpt.get('epoch', '?')}")
         model.to(device).eval()
 
-        print(f"\n[2/4] Preparing camera (identity R, T=[0,0,{args.tz}], f={args.focal})")
-        rot   = torch.eye(3, device=device).unsqueeze(0)
-        trans = torch.tensor([[0.0, 0.0, args.tz]], device=device)
-        focal = torch.tensor([args.focal], device=device)
+        # use dataset median camera if pix3d root is available, else fall back to CLI args
+        pix3d_root = os.path.join(ROOT, "data", "pix3d")
+        if os.path.exists(os.path.join(pix3d_root, "pix3d.json")):
+            print(f"\n[2/4] Computing median camera from training split …")
+            _rot, _trans, _focal = compute_median_camera(pix3d_root)
+            rot   = _rot.unsqueeze(0).to(device)
+            trans = _trans.unsqueeze(0).to(device)
+            focal = _focal.unsqueeze(0).to(device)
+        else:
+            print(f"\n[2/4] Using CLI camera (identity R, T=[0,0,{args.tz}], f={args.focal})")
+            rot   = torch.eye(3, device=device).unsqueeze(0)
+            trans = torch.tensor([[0.0, 0.0, args.tz]], device=device)
+            focal = torch.tensor([args.focal], device=device)
 
         print(f"\n[3/4] Running inference on {image_path}")
         image = load_image(image_path).to(device)
