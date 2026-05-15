@@ -519,6 +519,7 @@ def train(model, disc, train_loader, val_loader, optimizer, optimizer_disc, sche
 
             # === Generator step ===
             optimizer.zero_grad()
+            optimizer_disc.zero_grad()
             if torch.cuda.is_available():
                 with torch.cuda.amp.autocast():
                     out = model(img, rot, trans, focal)
@@ -526,7 +527,11 @@ def train(model, disc, train_loader, val_loader, optimizer, optimizer_disc, sche
                     for verts, faces, lap, w in zip(out["vertices"], out["faces"], out["laplacians"], stage_weights):
                         l, _ = compute_loss(verts, gt, faces.to(device), lap.to(device))
                         loss_g = loss_g + w * l
+                    for p in disc.parameters():
+                        p.requires_grad_(False)
                     fake_logits = disc(out["vertices"][-1], adj_final)
+                    for p in disc.parameters():
+                        p.requires_grad_(True)
                     loss_adv_g = fool_discriminator(fake_logits)
                     loss_g = loss_g + w_adv * loss_adv_g
                 scaler.scale(loss_g).backward()
@@ -539,7 +544,11 @@ def train(model, disc, train_loader, val_loader, optimizer, optimizer_disc, sche
                 for verts, faces, lap, w in zip(out["vertices"], out["faces"], out["laplacians"], stage_weights):
                     l, _ = compute_loss(verts, gt, faces.to(device), lap.to(device))
                     loss_g = loss_g + w * l
+                for p in disc.parameters():
+                    p.requires_grad_(False)
                 fake_logits = disc(out["vertices"][-1], adj_final)
+                for p in disc.parameters():
+                    p.requires_grad_(True)
                 loss_adv_g = fool_discriminator(fake_logits)
                 loss_g = loss_g + w_adv * loss_adv_g
                 loss_g.backward()
@@ -547,11 +556,11 @@ def train(model, disc, train_loader, val_loader, optimizer, optimizer_disc, sche
                 optimizer.step()
 
             # === Discriminator step ===
-            optimizer_disc.zero_grad()
             pred_verts_final = out["vertices"][-1].detach()
             if torch.cuda.is_available():
                 with torch.cuda.amp.autocast():
-                    fake_logits = disc(pred_verts_final, adj_final)
+                    with torch.no_grad():
+                        fake_logits = disc(pred_verts_final, adj_final)
                     real_logits = disc(gt[:, :pred_verts_final.shape[1], :], adj_final)
                     loss_d = compute_adversarial_loss(fake_logits, real_logits)
                 scaler_disc.scale(loss_d).backward()
@@ -559,7 +568,8 @@ def train(model, disc, train_loader, val_loader, optimizer, optimizer_disc, sche
                 scaler_disc.step(optimizer_disc)
                 scaler_disc.update()
             else:
-                fake_logits = disc(pred_verts_final, adj_final)
+                with torch.no_grad():
+                    fake_logits = disc(pred_verts_final, adj_final)
                 real_logits = disc(gt[:, :pred_verts_final.shape[1], :], adj_final)
                 loss_d = compute_adversarial_loss(fake_logits, real_logits)
                 loss_d.backward()
@@ -650,7 +660,7 @@ def main():
     parser.add_argument("--disc-hidden-dim", type=int, default=256, help="Discriminator hidden dimension")
     parser.add_argument("--n-stages", type=int, default=4, help="Number of deformation stages")
     parser.add_argument("--n-gcn-blocks", type=int, default=3, help="GCN blocks per stage")
-    parser.add_argument("--num-workers", type=int, default=4, help="Number of data loading workers")
+    parser.add_argument("--num-workers", type=int, default=0, help="Number of data loading workers")
     parser.add_argument("--ckpt-dir", type=str, default="./checkpoints", help="Directory to save checkpoints")
     parser.add_argument("--resume-ckpt", type=str, default=None, help="Path to checkpoint to resume from")
 
@@ -668,7 +678,7 @@ def main():
     model = Furniture3D(encoder=encoder, hidden_dim=args.hidden_dim, n_stages=args.n_stages, n_gcn_blocks=args.n_gcn_blocks).to(device)
     disc = MeshDiscriminator(hidden_dim=args.disc_hidden_dim).to(device)
 
-    model = DDP(model, device_ids=[rank] if torch.cuda.is_available() else None, find_unused_parameters=True)
+    model = DDP(model, device_ids=[rank] if torch.cuda.is_available() else None, find_unused_parameters=False)
     disc = DDP(disc, device_ids=[rank] if torch.cuda.is_available() else None, find_unused_parameters=False)
 
     fpn_params = list(model.module.encoder.lateral.parameters()) + list(model.module.encoder.output_convs.parameters())
