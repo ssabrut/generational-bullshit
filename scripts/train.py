@@ -278,15 +278,13 @@ class GraphConv(nn.Module):
         super().__init__()
         self.fc_self = nn.Linear(in_dim, out_dim, bias=False)
         self.fc_neigh = nn.Linear(in_dim, out_dim, bias=False)
-        self.bn = nn.BatchNorm1d(out_dim)
+        self.norm = nn.LayerNorm(out_dim)
         self.bias = nn.Parameter(torch.zeros(out_dim))
 
     def forward(self, x, adj):
-        B, V, _ = x.shape
         neigh = torch.einsum("vw,bwf->bvf", adj, x)
         out = self.fc_self(x) + self.fc_neigh(neigh) + self.bias
-        out = self.bn(out.reshape(B * V, -1)).reshape(B, V, -1)
-        return F.relu(out)
+        return F.relu(self.norm(out))
 
 
 class GCNBlock(nn.Module):
@@ -354,7 +352,7 @@ class Furniture3D(nn.Module):
     def forward(self, image, rot, trans, focal):
         B, device = image.shape[0], image.device
         feat_maps = self.encoder(image)
-        all_verts, all_faces, all_laps = [], [], []
+        all_verts, all_faces, all_laps, all_tmpls = [], [], [], []
         prev_h = None
 
         for i in range(self.n_stages):
@@ -382,9 +380,10 @@ class Furniture3D(nn.Module):
             all_verts.append(new_verts)
             all_faces.append(faces)
             all_laps.append(lap)
+            all_tmpls.append(verts_tmpl.to(device))
             prev_h = hidden
 
-        return {"vertices": all_verts, "faces": all_faces, "laplacians": all_laps}
+        return {"vertices": all_verts, "faces": all_faces, "laplacians": all_laps, "templates": all_tmpls}
 
 
 # Dataset
@@ -480,14 +479,18 @@ def edge_loss(vertices, faces):
     ]).mean()
 
 
-def laplacian_loss(vertices, lap):
-    return (torch.einsum("vw,bwc->bvc", lap, vertices) ** 2).mean()
+def laplacian_loss(vertices, lap, template_verts=None):
+    delta_pred = torch.einsum("vw,bwc->bvc", lap, vertices)
+    if template_verts is not None:
+        delta_tmpl = torch.einsum("vw,wc->vc", lap, template_verts).unsqueeze(0)
+        return ((delta_pred - delta_tmpl) ** 2).mean()
+    return (delta_pred ** 2).mean()
 
 
-def compute_loss(pred_verts, gt_pts, faces, lap, w_cd=1.0, w_edge=0.1, w_lap=0.5):
+def compute_loss(pred_verts, gt_pts, faces, lap, template_verts=None, w_cd=1.0, w_edge=0.1, w_lap=0.5):
     cd = chamfer_distance(pred_verts, gt_pts)
     el = edge_loss(pred_verts, faces)
-    lpl = laplacian_loss(pred_verts, lap)
+    lpl = laplacian_loss(pred_verts, lap, template_verts)
     total = w_cd * cd + w_edge * el + w_lap * lpl
     return total, {"chamfer": cd.item(), "edge": el.item(), "laplacian": lpl.item()}
 
@@ -596,8 +599,8 @@ def train(model, train_loader, val_loader, optimizer, scheduler, epochs, device,
                 with torch.amp.autocast("cuda"):
                     out = model(img, rot, trans, focal)
                     loss = torch.tensor(0., device=device)
-                    for verts, faces, lap, w in zip(out["vertices"], out["faces"], out["laplacians"], stage_weights):
-                        l, _ = compute_loss(verts, gt, faces.to(device), lap.to(device))
+                    for verts, faces, lap, tmpl, w in zip(out["vertices"], out["faces"], out["laplacians"], out["templates"], stage_weights):
+                        l, _ = compute_loss(verts, gt, faces.to(device), lap.to(device), template_verts=tmpl)
                         loss = loss + w * l
                 scaler.scale(loss).backward()
                 torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
@@ -606,8 +609,8 @@ def train(model, train_loader, val_loader, optimizer, scheduler, epochs, device,
             else:
                 out = model(img, rot, trans, focal)
                 loss = torch.tensor(0., device=device)
-                for verts, faces, lap, w in zip(out["vertices"], out["faces"], out["laplacians"], stage_weights):
-                    l, _ = compute_loss(verts, gt, faces.to(device), lap.to(device))
+                for verts, faces, lap, tmpl, w in zip(out["vertices"], out["faces"], out["laplacians"], out["templates"], stage_weights):
+                    l, _ = compute_loss(verts, gt, faces.to(device), lap.to(device), template_verts=tmpl)
                     loss = loss + w * l
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
@@ -665,8 +668,8 @@ def evaluate(model, val_loader, device, stage_weights):
 
             out = model(img, rot, trans, focal)
             loss = torch.tensor(0., device=device)
-            for verts, faces, lap, w in zip(out["vertices"], out["faces"], out["laplacians"], stage_weights):
-                l, _ = compute_loss(verts, gt, faces.to(device), lap.to(device))
+            for verts, faces, lap, tmpl, w in zip(out["vertices"], out["faces"], out["laplacians"], out["templates"], stage_weights):
+                l, _ = compute_loss(verts, gt, faces.to(device), lap.to(device), template_verts=tmpl)
                 loss = loss + w * l
             total_loss += loss.item()
 
@@ -685,7 +688,7 @@ def save_quantized(model, ckpt_dir):
 def main():
     parser = argparse.ArgumentParser(description="Distributed training for Pixel2Mesh with DINOv2")
     parser.add_argument("--pix3d-root", type=str, default="data/pix3d", help="Path to Pix3D dataset")
-    parser.add_argument("--batch-size", type=int, default=32, help="Batch size per GPU")
+    parser.add_argument("--batch-size", type=int, default=64, help="Batch size per GPU")
     parser.add_argument("--epochs", type=int, default=100, help="Number of epochs")
     parser.add_argument("--lr-fpn", type=float, default=1e-4, help="Learning rate for FPN")
     parser.add_argument("--lr-gcn", type=float, default=4e-5, help="Learning rate for GCN")
@@ -722,7 +725,10 @@ def main():
         {"params": gcn_params, "lr": args.lr_gcn},
     ], weight_decay=1e-4)
 
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
+    warmup_epochs = max(1, args.epochs // 20)
+    warmup = torch.optim.lr_scheduler.LinearLR(optimizer, start_factor=0.1, end_factor=1.0, total_iters=warmup_epochs)
+    cosine = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=max(1, args.epochs - warmup_epochs))
+    scheduler = torch.optim.lr_scheduler.SequentialLR(optimizer, schedulers=[warmup, cosine], milestones=[warmup_epochs])
 
     train_ds = Pix3DDataset(args.pix3d_root, "train", categories=["chair"])
     val_ds = Pix3DDataset(args.pix3d_root, "val", categories=["chair"])
