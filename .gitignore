@@ -10,6 +10,7 @@ data/PNG/no_text/
 data/PNG/preprocessed/
 data/PNG/skeleton_corners/
 data/pix3d/
+data/ShapeNetChairs/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
