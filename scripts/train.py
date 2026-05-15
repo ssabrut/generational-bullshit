@@ -123,12 +123,63 @@ def build_laplacian(vertices, faces):
 
 
 # Feature extraction
-def project_vertices(vertices, rot, trans, focal):
+def project_vertices(vertices, rot, trans, focal, return_raw=False):
     v_cam = torch.bmm(vertices, rot.transpose(1, 2)) + trans.unsqueeze(1)
     z = v_cam[..., 2:3].clamp(min=1e-6)
     f = focal.view(-1, 1, 1)
     xy = f * v_cam[..., :2] / z
+    if return_raw:
+        return xy.clamp(-1, 1), xy
     return xy.clamp(-1, 1)
+
+
+def verify_projection(loader, device, n_batches=3, sat_threshold=0.5):
+    """Sanity check: project the unit cube template with each batch's camera params
+    and report how often coords saturate at ±1. High saturation => GT mesh
+    normalisation and camera (rot/trans/focal) live in different frames, so the
+    GCN sees near-identical features per vertex."""
+    print("\n=== Projection verification ===")
+    verts_tmpl, _ = get_unit_cube()
+    any_bad = False
+    for bi, batch in enumerate(loader):
+        if bi >= n_batches:
+            break
+        rot = batch["rot"].to(device)
+        trans = batch["trans"].to(device)
+        focal = batch["focal"].to(device)
+        gt = batch["gt_points"].to(device)
+        B = rot.shape[0]
+        verts = verts_tmpl.to(device).unsqueeze(0).expand(B, -1, -1)
+
+        _, raw = project_vertices(verts, rot, trans, focal, return_raw=True)
+        sat_frac = ((raw.abs() >= 1.0).any(dim=-1)).float().mean().item()
+        x_min, x_max = raw[..., 0].min().item(), raw[..., 0].max().item()
+        y_min, y_max = raw[..., 1].min().item(), raw[..., 1].max().item()
+
+        gt_min = gt.amin(dim=(0, 1)).tolist()
+        gt_max = gt.amax(dim=(0, 1)).tolist()
+        t_min = trans.amin(dim=0).tolist()
+        t_max = trans.amax(dim=0).tolist()
+
+        flag = "  <-- SATURATED" if sat_frac > sat_threshold else ""
+        print(f"[batch {bi}] B={B}")
+        print(f"  cube proj raw: x=[{x_min:+.3f}, {x_max:+.3f}]  y=[{y_min:+.3f}, {y_max:+.3f}]")
+        print(f"  saturated vertices (|x| or |y| >= 1): {sat_frac*100:.1f}%{flag}")
+        print(f"  gt point range : x=[{gt_min[0]:+.3f},{gt_max[0]:+.3f}] y=[{gt_min[1]:+.3f},{gt_max[1]:+.3f}] z=[{gt_min[2]:+.3f},{gt_max[2]:+.3f}]")
+        print(f"  trans range    : x=[{t_min[0]:+.3f},{t_max[0]:+.3f}] y=[{t_min[1]:+.3f},{t_max[1]:+.3f}] z=[{t_min[2]:+.3f},{t_max[2]:+.3f}]")
+        print(f"  focal range    : [{focal.min().item():.3f}, {focal.max().item():.3f}]")
+        if sat_frac > sat_threshold:
+            any_bad = True
+
+    if any_bad:
+        print("\n[WARN] High saturation detected. The unit cube template projects outside")
+        print("       the image. Likely cause: GT mesh is normalised to unit-norm but")
+        print("       trans/focal come from raw Pix3D coords. Fix: either skip")
+        print("       normalise_mesh and predict in camera space, or scale trans by")
+        print("       the same factor used to normalise the mesh.")
+    else:
+        print("\n[OK] Projection coords mostly inside [-1, 1].")
+    print("=== End verification ===\n")
 
 
 def sample_features(feature_maps, coords):
@@ -141,7 +192,7 @@ def sample_features(feature_maps, coords):
 
 
 # DINOv2 + FPN Encoder
-_DINOV2_MODEL = "dinov2_vits14"
+_DINOV2_MODEL = "dinov2_vitb14"
 _FPN_CHANNELS = 256
 _TAP_BLOCKS = [2, 5, 8, 11]
 
@@ -336,27 +387,6 @@ class Furniture3D(nn.Module):
         return {"vertices": all_verts, "faces": all_faces, "laplacians": all_laps}
 
 
-# Mesh Discriminator
-class MeshDiscriminator(nn.Module):
-    def __init__(self, hidden_dim=256):
-        super().__init__()
-        self.gc1 = GraphConv(3, hidden_dim)
-        self.gc2 = GraphConv(hidden_dim, hidden_dim)
-        self.gc3 = GraphConv(hidden_dim, hidden_dim)
-        self.pool = nn.AdaptiveAvgPool1d(1)
-        self.head = nn.Sequential(
-            nn.Linear(hidden_dim, 128), nn.ReLU(),
-            nn.Linear(128, 1)
-        )
-
-    def forward(self, verts, adj):
-        h = self.gc1(verts, adj)
-        h = self.gc2(h, adj)
-        h = self.gc3(h, adj)
-        h = self.pool(h.permute(0, 2, 1)).squeeze(-1)
-        return self.head(h)
-
-
 # Dataset
 def load_obj(path):
     verts, faces = [], []
@@ -399,7 +429,8 @@ class Pix3DDataset(Dataset):
             anns = json.load(f)
         cats = set(categories or PIX3D_CATS)
         anns = [a for a in anns if a["category"] in cats
-                and not a.get("truncated") and not a.get("occluded")]
+                and not a.get("truncated") and not a.get("occluded")
+                and a.get("trans_mat") and a.get("focal_length") and a.get("img_size")]
         random.seed(42)
         random.shuffle(anns)
         n = len(anns)
@@ -427,8 +458,12 @@ class Pix3DDataset(Dataset):
         gt_pts = sample_surface(verts, faces, self.n_pts)
         rot = torch.tensor(a["rot_mat"], dtype=torch.float32)
         trans = torch.tensor(a["trans_mat"], dtype=torch.float32)
+        # Clamp depth so the projection never explodes near z=0
+        trans[2] = trans[2].clamp(min=1.0)
         w, h = a["img_size"]
         focal = torch.tensor(a["focal_length"] / (max(w, h) / 2.), dtype=torch.float32)
+        # Clamp focal to a sane NDC range (extreme telephoto/fisheye → border samples)
+        focal = focal.clamp(0.3, 6.0)
         return {"image": image, "gt_points": gt_pts, "rot": rot, "trans": trans, "focal": focal}
 
 
@@ -457,16 +492,6 @@ def compute_loss(pred_verts, gt_pts, faces, lap, w_cd=1.0, w_edge=0.1, w_lap=0.5
     return total, {"chamfer": cd.item(), "edge": el.item(), "laplacian": lpl.item()}
 
 
-def compute_adversarial_loss(pred_logits, real_logits):
-    fake_loss = F.binary_cross_entropy_with_logits(pred_logits, torch.zeros_like(pred_logits))
-    real_loss = F.binary_cross_entropy_with_logits(real_logits, torch.ones_like(real_logits))
-    return (fake_loss + real_loss) / 2.0
-
-
-def fool_discriminator(pred_logits):
-    return F.binary_cross_entropy_with_logits(pred_logits, torch.ones_like(pred_logits))
-
-
 def get_stage_weights(n_stages, base_weights=None):
     if base_weights is not None and len(base_weights) == n_stages:
         return base_weights
@@ -475,8 +500,7 @@ def get_stage_weights(n_stages, base_weights=None):
     return weights.tolist()
 
 
-def _render_step(step, epoch, pred_verts_list, faces_list, gt_pts,
-                 g_losses, adv_losses, d_losses):
+def _render_step(step, epoch, pred_verts_list, faces_list, gt_pts, losses, save_path=None):
     n_stages = len(pred_verts_list)
     # columns: loss | gt | stage_1 .. stage_N
     n_cols = 1 + 1 + n_stages
@@ -484,10 +508,8 @@ def _render_step(step, epoch, pred_verts_list, faces_list, gt_pts,
 
     # --- Loss plot ---
     ax_loss = fig.add_subplot(1, n_cols, 1)
-    xs = range(len(g_losses))
-    ax_loss.plot(xs, g_losses,   label="G loss",   linewidth=1.2)
-    ax_loss.plot(xs, adv_losses, label="Adv loss",  linewidth=1.2)
-    ax_loss.plot(xs, d_losses,   label="D loss",    linewidth=1.2)
+    xs = range(len(losses))
+    ax_loss.plot(xs, losses, label="loss", linewidth=1.2)
     ax_loss.set_title(f"Loss (epoch {epoch}, step {step})", fontsize=9)
     ax_loss.set_xlabel("step", fontsize=8)
     ax_loss.legend(fontsize=7)
@@ -517,24 +539,26 @@ def _render_step(step, epoch, pred_verts_list, faces_list, gt_pts,
 
     fig.suptitle(f"Epoch {epoch} | Step {step}", fontsize=11)
     fig.tight_layout()
+    if save_path is not None:
+        fig.savefig(save_path, dpi=100, bbox_inches="tight")
     plt.pause(0.001)
     plt.close(fig)
 
 
-def train(model, disc, train_loader, val_loader, optimizer, optimizer_disc, scheduler, epochs, device, rank, w_adv=0.15, ckpt_dir="./checkpoints", resume_ckpt=None, vis_every=5):
+def train(model, train_loader, val_loader, optimizer, scheduler, epochs, device, rank, ckpt_dir="./checkpoints", resume_ckpt=None, vis_every=5, vis_dir=None):
     os.makedirs(ckpt_dir, exist_ok=True)
     if rank == 0:
         plt.ion()
+        if vis_dir:
+            os.makedirs(vis_dir, exist_ok=True)
 
     scaler = torch.amp.GradScaler("cuda") if torch.cuda.is_available() else None
-    scaler_disc = torch.amp.GradScaler("cuda") if torch.cuda.is_available() else None
 
     model_inner = model.module if isinstance(model, DDP) else model
-    disc_inner = disc.module if isinstance(disc, DDP) else disc
     model_n_stages = model_inner.n_stages
     stage_weights = get_stage_weights(model_n_stages, STAGE_WEIGHTS)
 
-    g_losses, adv_losses, d_losses = [], [], []
+    losses = []
     global_step = 0
 
     start_epoch = 1
@@ -542,9 +566,7 @@ def train(model, disc, train_loader, val_loader, optimizer, optimizer_disc, sche
         map_loc = {"cuda:0": f"cuda:{rank}"} if torch.cuda.is_available() else "cpu"
         ckpt = torch.load(resume_ckpt, map_location=map_loc)
         model_inner.load_state_dict(ckpt["model"])
-        disc_inner.load_state_dict(ckpt["discriminator"])
         optimizer.load_state_dict(ckpt["optimizer"])
-        optimizer_disc.load_state_dict(ckpt["optimizer_disc"])
         if scheduler and ckpt.get("scheduler"):
             scheduler.load_state_dict(ckpt["scheduler"])
         start_epoch = ckpt["epoch"] + 1
@@ -556,8 +578,7 @@ def train(model, disc, train_loader, val_loader, optimizer, optimizer_disc, sche
 
     for epoch in range(start_epoch, epochs + 1):
         model.train()
-        disc.train()
-        epoch_loss = epoch_adv = epoch_disc_loss = 0.0
+        epoch_loss = 0.0
 
         if hasattr(train_loader.sampler, 'set_epoch'):
             train_loader.sampler.set_epoch(epoch)
@@ -570,84 +591,41 @@ def train(model, disc, train_loader, val_loader, optimizer, optimizer_disc, sche
             trans = batch["trans"].to(device)
             focal = batch["focal"].to(device)
 
-            adj_final = getattr(model_inner, f"adj_{model_n_stages - 1}").to(device)
-
-            # === Generator step ===
             optimizer.zero_grad()
-            optimizer_disc.zero_grad()
             if torch.cuda.is_available():
-                with torch.cuda.amp.autocast():
+                with torch.amp.autocast("cuda"):
                     out = model(img, rot, trans, focal)
-                    loss_g = torch.tensor(0., device=device)
+                    loss = torch.tensor(0., device=device)
                     for verts, faces, lap, w in zip(out["vertices"], out["faces"], out["laplacians"], stage_weights):
                         l, _ = compute_loss(verts, gt, faces.to(device), lap.to(device))
-                        loss_g = loss_g + w * l
-                    for p in disc.parameters():
-                        p.requires_grad_(False)
-                    fake_logits = disc(out["vertices"][-1], adj_final)
-                    for p in disc.parameters():
-                        p.requires_grad_(True)
-                    loss_adv_g = fool_discriminator(fake_logits)
-                    loss_g = loss_g + w_adv * loss_adv_g
-                scaler.scale(loss_g).backward()
+                        loss = loss + w * l
+                scaler.scale(loss).backward()
                 torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
                 scaler.step(optimizer)
                 scaler.update()
             else:
                 out = model(img, rot, trans, focal)
-                loss_g = torch.tensor(0., device=device)
+                loss = torch.tensor(0., device=device)
                 for verts, faces, lap, w in zip(out["vertices"], out["faces"], out["laplacians"], stage_weights):
                     l, _ = compute_loss(verts, gt, faces.to(device), lap.to(device))
-                    loss_g = loss_g + w * l
-                for p in disc.parameters():
-                    p.requires_grad_(False)
-                fake_logits = disc(out["vertices"][-1], adj_final)
-                for p in disc.parameters():
-                    p.requires_grad_(True)
-                loss_adv_g = fool_discriminator(fake_logits)
-                loss_g = loss_g + w_adv * loss_adv_g
-                loss_g.backward()
+                    loss = loss + w * l
+                loss.backward()
                 torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
                 optimizer.step()
 
-            # === Discriminator step ===
-            pred_verts_final = out["vertices"][-1].detach()
-            if torch.cuda.is_available():
-                with torch.cuda.amp.autocast():
-                    with torch.no_grad():
-                        fake_logits = disc(pred_verts_final, adj_final)
-                    real_logits = disc(gt[:, :pred_verts_final.shape[1], :], adj_final)
-                    loss_d = compute_adversarial_loss(fake_logits, real_logits)
-                scaler_disc.scale(loss_d).backward()
-                torch.nn.utils.clip_grad_norm_(disc.parameters(), 1.0)
-                scaler_disc.step(optimizer_disc)
-                scaler_disc.update()
-            else:
-                with torch.no_grad():
-                    fake_logits = disc(pred_verts_final, adj_final)
-                real_logits = disc(gt[:, :pred_verts_final.shape[1], :], adj_final)
-                loss_d = compute_adversarial_loss(fake_logits, real_logits)
-                loss_d.backward()
-                torch.nn.utils.clip_grad_norm_(disc.parameters(), 1.0)
-                optimizer_disc.step()
-
-            epoch_loss += loss_g.item()
-            epoch_adv += loss_adv_g.item()
-            epoch_disc_loss += loss_d.item()
-            pbar.set_postfix(loss=f"{loss_g.item():.4f}", adv=f"{loss_adv_g.item():.4f}", disc=f"{loss_d.item():.4f}")
+            epoch_loss += loss.item()
+            pbar.set_postfix(loss=f"{loss.item():.4f}")
 
             global_step += 1
             if rank == 0:
-                g_losses.append(loss_g.item())
-                adv_losses.append(loss_adv_g.item())
-                d_losses.append(loss_d.item())
+                losses.append(loss.item())
                 if global_step % vis_every == 0:
-                    _render_step(global_step, epoch, out["vertices"], out["faces"], gt,
-                                 g_losses, adv_losses, d_losses)
+                    save_path = None
+                    if vis_dir:
+                        save_path = os.path.join(vis_dir, f"epoch{epoch:04d}_step{global_step:07d}.png")
+                    _render_step(global_step, epoch, out["vertices"], out["faces"], gt, losses, save_path=save_path)
 
         avg_loss = epoch_loss / len(train_loader)
-        avg_adv = epoch_adv / len(train_loader)
-        avg_disc = epoch_disc_loss / len(train_loader)
 
         val_loss = None
         if val_loader and epoch % 5 == 0:
@@ -659,21 +637,19 @@ def train(model, disc, train_loader, val_loader, optimizer, optimizer_disc, sche
             scheduler.step()
 
         if rank == 0:
-            print(f"Epoch {epoch}/{epochs} | train: {avg_loss:.4f} | adv: {avg_adv:.4f} | disc: {avg_disc:.4f}")
+            print(f"Epoch {epoch}/{epochs} | train: {avg_loss:.4f}")
             ckpt_path = os.path.join(ckpt_dir, f"ckpt_epoch_{epoch:04d}.pth")
             torch.save({
                 "epoch": epoch,
                 "model": model_inner.state_dict(),
-                "discriminator": disc_inner.state_dict(),
                 "optimizer": optimizer.state_dict(),
-                "optimizer_disc": optimizer_disc.state_dict(),
                 "scheduler": scheduler.state_dict() if scheduler else None,
                 "val_loss": val_loss,
             }, ckpt_path)
             print(f"Checkpoint saved → {ckpt_path}")
 
     if rank == 0:
-        save_quantized(model_inner, disc_inner, ckpt_dir)
+        save_quantized(model_inner, ckpt_dir)
 
 
 def evaluate(model, val_loader, device, stage_weights):
@@ -698,36 +674,30 @@ def evaluate(model, val_loader, device, stage_weights):
     return total_loss / len(val_loader)
 
 
-def save_quantized(model, disc, ckpt_dir):
+def save_quantized(model, ckpt_dir):
     model.eval()
-    disc.eval()
     q_model = torch.ao.quantization.quantize_dynamic(model.cpu(), {nn.Linear}, dtype=torch.qint8)  # type: ignore[attr-defined]
-    q_disc = torch.ao.quantization.quantize_dynamic(disc.cpu(), {nn.Linear}, dtype=torch.qint8)  # type: ignore[attr-defined]
     path_model = os.path.join(ckpt_dir, "model_quantized.pth")
-    path_disc = os.path.join(ckpt_dir, "discriminator_quantized.pth")
     torch.save(q_model.state_dict(), path_model)
-    torch.save(q_disc.state_dict(), path_disc)
     print(f"Quantized model saved → {path_model}")
-    print(f"Quantized discriminator saved → {path_disc}")
 
 
 def main():
     parser = argparse.ArgumentParser(description="Distributed training for Pixel2Mesh with DINOv2")
     parser.add_argument("--pix3d-root", type=str, default="data/pix3d", help="Path to Pix3D dataset")
-    parser.add_argument("--batch-size", type=int, default=64, help="Batch size per GPU")
+    parser.add_argument("--batch-size", type=int, default=32, help="Batch size per GPU")
     parser.add_argument("--epochs", type=int, default=100, help="Number of epochs")
     parser.add_argument("--lr-fpn", type=float, default=1e-4, help="Learning rate for FPN")
-    parser.add_argument("--lr-gcn", type=float, default=5e-5, help="Learning rate for GCN")
-    parser.add_argument("--lr-disc", type=float, default=3e-5, help="Learning rate for discriminator")
-    parser.add_argument("--w-adv", type=float, default=0.15, help="Adversarial loss weight")
-    parser.add_argument("--hidden-dim", type=int, default=512, help="Hidden dimension")
-    parser.add_argument("--disc-hidden-dim", type=int, default=256, help="Discriminator hidden dimension")
+    parser.add_argument("--lr-gcn", type=float, default=4e-5, help="Learning rate for GCN")
+    parser.add_argument("--hidden-dim", type=int, default=256, help="Hidden dimension")
     parser.add_argument("--n-stages", type=int, default=4, help="Number of deformation stages")
     parser.add_argument("--n-gcn-blocks", type=int, default=3, help="GCN blocks per stage")
-    parser.add_argument("--num-workers", type=int, default=0, help="Number of data loading workers")
+    parser.add_argument("--num-workers", type=int, default=min(8, os.cpu_count() or 1), help="Number of data loading workers")
     parser.add_argument("--ckpt-dir", type=str, default="./checkpoints", help="Directory to save checkpoints")
     parser.add_argument("--resume-ckpt", type=str, default=None, help="Path to checkpoint to resume from")
     parser.add_argument("--vis-every", type=int, default=1, help="Save mesh visualization every N steps")
+    parser.add_argument("--vis-dir", type=str, default=None, help="If set, also save each visualization PNG to this directory")
+    parser.add_argument("--verify-projection", action="store_true", help="Run projection sanity check before training and exit")
 
     args = parser.parse_args()
 
@@ -741,10 +711,8 @@ def main():
 
     encoder = DINOv2FPNEncoder(freeze_backbone=True).to(device)
     model = Furniture3D(encoder=encoder, hidden_dim=args.hidden_dim, n_stages=args.n_stages, n_gcn_blocks=args.n_gcn_blocks).to(device)
-    disc = MeshDiscriminator(hidden_dim=args.disc_hidden_dim).to(device)
 
     model = DDP(model, device_ids=[rank] if torch.cuda.is_available() else None, find_unused_parameters=False)
-    disc = DDP(disc, device_ids=[rank] if torch.cuda.is_available() else None, find_unused_parameters=False)
 
     fpn_params = list(model.module.encoder.lateral.parameters()) + list(model.module.encoder.output_convs.parameters())
     gcn_params = [p for n, p in model.module.named_parameters() if "encoder" not in n]
@@ -754,7 +722,6 @@ def main():
         {"params": gcn_params, "lr": args.lr_gcn},
     ], weight_decay=1e-4)
 
-    optimizer_disc = torch.optim.AdamW(disc.parameters(), lr=args.lr_disc, weight_decay=1e-4)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
 
     train_ds = Pix3DDataset(args.pix3d_root, "train", categories=["chair"])
@@ -771,13 +738,17 @@ def main():
         print(f"Validation dataset: {len(val_ds)} samples")
         total_p = sum(p.numel() for p in model.parameters())
         train_p = sum(p.numel() for p in model.parameters() if p.requires_grad)
-        disc_p = sum(p.numel() for p in disc.parameters())
         print(f"Model total params: {total_p:,}  trainable: {train_p:,}")
-        print(f"Discriminator params: {disc_p:,}")
 
-    train(model, disc, train_loader, val_loader, optimizer, optimizer_disc, scheduler,
-          args.epochs, device, rank, w_adv=args.w_adv, ckpt_dir=args.ckpt_dir, resume_ckpt=args.resume_ckpt,
-          vis_every=args.vis_every)
+    if args.verify_projection:
+        if rank == 0:
+            verify_projection(train_loader, device)
+        cleanup_distributed()
+        return
+
+    train(model, train_loader, val_loader, optimizer, scheduler,
+          args.epochs, device, rank, ckpt_dir=args.ckpt_dir, resume_ckpt=args.resume_ckpt,
+          vis_every=args.vis_every, vis_dir=args.vis_dir)
 
     cleanup_distributed()
 

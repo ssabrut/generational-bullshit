@@ -1,3 +1,6 @@
+# Checkpoints
+checkpoints/
+
 # Data
 data/PNG/corners/
 data/PNG/crop_and_pad/
