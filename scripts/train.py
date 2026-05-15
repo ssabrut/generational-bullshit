@@ -15,6 +15,10 @@ from torch.utils.data import Dataset, DataLoader
 from torch.utils.data.distributed import DistributedSampler
 from torch.nn.parallel import DistributedDataParallel as DDP
 import argparse
+import matplotlib
+matplotlib.use("MacOSX")
+import matplotlib.pyplot as plt
+from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 
 # Constants
 PIX3D_CATS = ["bed", "bookcase", "chair", "desk", "misc", "sofa", "table", "tool", "wardrobe"]
@@ -471,8 +475,56 @@ def get_stage_weights(n_stages, base_weights=None):
     return weights.tolist()
 
 
-def train(model, disc, train_loader, val_loader, optimizer, optimizer_disc, scheduler, epochs, device, rank, w_adv=0.15, ckpt_dir="./checkpoints", resume_ckpt=None):
+def _render_step(step, epoch, pred_verts_list, faces_list, gt_pts,
+                 g_losses, adv_losses, d_losses):
+    n_stages = len(pred_verts_list)
+    # columns: loss | gt | stage_1 .. stage_N
+    n_cols = 1 + 1 + n_stages
+    fig = plt.figure(figsize=(4 * n_cols, 4))
+
+    # --- Loss plot ---
+    ax_loss = fig.add_subplot(1, n_cols, 1)
+    xs = range(len(g_losses))
+    ax_loss.plot(xs, g_losses,   label="G loss",   linewidth=1.2)
+    ax_loss.plot(xs, adv_losses, label="Adv loss",  linewidth=1.2)
+    ax_loss.plot(xs, d_losses,   label="D loss",    linewidth=1.2)
+    ax_loss.set_title(f"Loss (epoch {epoch}, step {step})", fontsize=9)
+    ax_loss.set_xlabel("step", fontsize=8)
+    ax_loss.legend(fontsize=7)
+    ax_loss.grid(True, linewidth=0.4, alpha=0.5)
+    ax_loss.tick_params(labelsize=7)
+
+    # --- GT point cloud ---
+    ax_gt = fig.add_subplot(1, n_cols, 2, projection="3d")
+    gp = gt_pts[0].detach().cpu().numpy()
+    ax_gt.scatter(gp[:, 0], gp[:, 1], gp[:, 2], s=1, c="#20B2AA", alpha=0.4)
+    ax_gt.set_title("GT Point Cloud", fontsize=9)
+    ax_gt.set_axis_off()
+
+    # --- Predicted mesh per stage ---
+    colors = plt.cm.tab10(np.linspace(0, 1, n_stages))
+    for i, (verts, faces) in enumerate(zip(pred_verts_list, faces_list)):
+        ax = fig.add_subplot(1, n_cols, 3 + i, projection="3d")
+        pv = verts[0].detach().cpu().numpy()
+        ff = faces.cpu().numpy()
+        tris = [pv[f] for f in ff]
+        poly = Poly3DCollection(tris, alpha=0.3, facecolor=colors[i], edgecolor="#555", linewidth=0.1)
+        ax.add_collection3d(poly)
+        lim = 0.6
+        ax.set_xlim(-lim, lim); ax.set_ylim(-lim, lim); ax.set_zlim(-lim, lim)
+        ax.set_title(f"Stage {i + 1}  ({pv.shape[0]}V)", fontsize=9)
+        ax.set_axis_off()
+
+    fig.suptitle(f"Epoch {epoch} | Step {step}", fontsize=11)
+    fig.tight_layout()
+    plt.pause(0.001)
+    plt.close(fig)
+
+
+def train(model, disc, train_loader, val_loader, optimizer, optimizer_disc, scheduler, epochs, device, rank, w_adv=0.15, ckpt_dir="./checkpoints", resume_ckpt=None, vis_every=5):
     os.makedirs(ckpt_dir, exist_ok=True)
+    if rank == 0:
+        plt.ion()
 
     scaler = torch.amp.GradScaler("cuda") if torch.cuda.is_available() else None
     scaler_disc = torch.amp.GradScaler("cuda") if torch.cuda.is_available() else None
@@ -481,6 +533,9 @@ def train(model, disc, train_loader, val_loader, optimizer, optimizer_disc, sche
     disc_inner = disc.module if isinstance(disc, DDP) else disc
     model_n_stages = model_inner.n_stages
     stage_weights = get_stage_weights(model_n_stages, STAGE_WEIGHTS)
+
+    g_losses, adv_losses, d_losses = [], [], []
+    global_step = 0
 
     start_epoch = 1
     if resume_ckpt and os.path.isfile(resume_ckpt):
@@ -581,6 +636,15 @@ def train(model, disc, train_loader, val_loader, optimizer, optimizer_disc, sche
             epoch_disc_loss += loss_d.item()
             pbar.set_postfix(loss=f"{loss_g.item():.4f}", adv=f"{loss_adv_g.item():.4f}", disc=f"{loss_d.item():.4f}")
 
+            global_step += 1
+            if rank == 0:
+                g_losses.append(loss_g.item())
+                adv_losses.append(loss_adv_g.item())
+                d_losses.append(loss_d.item())
+                if global_step % vis_every == 0:
+                    _render_step(global_step, epoch, out["vertices"], out["faces"], gt,
+                                 g_losses, adv_losses, d_losses)
+
         avg_loss = epoch_loss / len(train_loader)
         avg_adv = epoch_adv / len(train_loader)
         avg_disc = epoch_disc_loss / len(train_loader)
@@ -663,6 +727,7 @@ def main():
     parser.add_argument("--num-workers", type=int, default=0, help="Number of data loading workers")
     parser.add_argument("--ckpt-dir", type=str, default="./checkpoints", help="Directory to save checkpoints")
     parser.add_argument("--resume-ckpt", type=str, default=None, help="Path to checkpoint to resume from")
+    parser.add_argument("--vis-every", type=int, default=1, help="Save mesh visualization every N steps")
 
     args = parser.parse_args()
 
@@ -711,7 +776,8 @@ def main():
         print(f"Discriminator params: {disc_p:,}")
 
     train(model, disc, train_loader, val_loader, optimizer, optimizer_disc, scheduler,
-          args.epochs, device, rank, w_adv=args.w_adv, ckpt_dir=args.ckpt_dir, resume_ckpt=args.resume_ckpt)
+          args.epochs, device, rank, w_adv=args.w_adv, ckpt_dir=args.ckpt_dir, resume_ckpt=args.resume_ckpt,
+          vis_every=args.vis_every)
 
     cleanup_distributed()
 
