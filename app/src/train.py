@@ -380,12 +380,12 @@ def train(
     n_epochs: int = 50,
     batch_size: int = 2,
     n_render_views: int = 4,  # target render views sampled per instance
-    n_rays: int = 512,  # rays per render view per step
+    n_rays: int = 1024,  # rays per render view per step
     render_size: int = 256,  # resize render images to this before cropping
     lr_gen: float = 5e-4,
     lr_nerf: float = 5e-4,
-    w_tv: float = 1e-4,
-    w_l2: float = 1e-4,
+    w_tv: float = 5e-5,  # halved — TV was over-smoothing thin structures
+    w_l2: float = 1e-6,  # 100× lower — was suppressing useful plane activations
     val_every: int = 5,  # validate every N epochs
     resume: str = None,  # path to checkpoint to resume from
     vis_dir: str = None,  # dashboard PNGs; defaults to {ckpt_dir}/plots
@@ -429,12 +429,12 @@ def train(
 
     # ── model + optimizer ─────────────────────────────────────────────────────
     model = TriplaneNeRF(
-        plane_ch=32,
-        plane_res=64,
-        nerf_hidden=128,
-        n_samples=64,
-        near=0.5,
-        far=4.5,
+        plane_ch=48,
+        plane_res=96,
+        nerf_hidden=192,
+        n_samples=96,
+        near=1.5,
+        far=4.0,
     ).to(device)
     optimizer = make_optimizer(model, lr_gen=lr_gen, lr_nerf=lr_nerf)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
@@ -756,12 +756,12 @@ if __name__ == "__main__":
         n_epochs=100,
         batch_size=4,
         n_render_views=4,
-        n_rays=512,
+        n_rays=1024,
         render_size=256,
         lr_gen=5e-4,
         lr_nerf=5e-4,
-        w_tv=1e-4,
-        w_l2=1e-4,
+        w_tv=5e-5,
+        w_l2=1e-6,
         val_every=5,
         resume=None,
         vis_dir="checkpoints/plot",

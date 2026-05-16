@@ -3,8 +3,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 _DINOV2_MODEL = "dinov2_vitb14"  # embed_dim = 768
-_PLANE_CH = 32  # feature channels per triplane
-_PLANE_RES = 64  # spatial resolution of each plane (H = W)
+_PLANE_CH = 48  # feature channels per triplane
+_PLANE_RES = 96  # spatial resolution of each plane (H = W)
 _SCENE_BOUND = 1.2  # scene occupies [-bound, bound]^3
 
 
@@ -67,9 +67,16 @@ class TriplaneGenerator(nn.Module):
         super().__init__()
         self.plane_ch = plane_ch
         self.plane_res = plane_res
-        flat_dim = 3 * plane_ch * plane_res * plane_res
+        # MLP outputs a small low-res seed (plane_res // 4), then ConvTranspose
+        # upsamples ×4 to the final resolution. This keeps the giant linear
+        # projection tractable while still producing high-res triplanes.
+        assert plane_res % 4 == 0, "plane_res must be divisible by 4"
+        seed_res = plane_res // 4
+        self.seed_res = seed_res
+        seed_ch = plane_ch * 2  # wider at low-res, narrowed during upsample
+        self.seed_ch = seed_ch
+        flat_dim = 3 * seed_ch * seed_res * seed_res
 
-        # Project image feature → flat triplane token
         hidden = 1024
         self.mlp = nn.Sequential(
             nn.Linear(in_dim, hidden),
@@ -81,9 +88,17 @@ class TriplaneGenerator(nn.Module):
             nn.Linear(hidden, flat_dim),
         )
 
-        # Per-plane spatial refinement (shared weights across the 3 planes)
+        # Per-plane spatial refinement (shared weights across the 3 planes).
+        # ConvTranspose ×2, ×2 upsampling + refinement convs. Lets the model
+        # learn high-frequency structure (legs, edges) at full plane_res.
         self.refine = nn.Sequential(
+            nn.Conv2d(seed_ch, seed_ch, 3, padding=1),
+            nn.GELU(),
+            nn.ConvTranspose2d(seed_ch, plane_ch, 4, stride=2, padding=1),  # ×2
+            nn.GELU(),
             nn.Conv2d(plane_ch, plane_ch, 3, padding=1),
+            nn.GELU(),
+            nn.ConvTranspose2d(plane_ch, plane_ch, 4, stride=2, padding=1),  # ×2
             nn.GELU(),
             nn.Conv2d(plane_ch, plane_ch, 3, padding=1),
             nn.GELU(),
@@ -96,11 +111,9 @@ class TriplaneGenerator(nn.Module):
         Returns  : [B, 3, C, H, W]  — (XY, XZ, YZ) planes
         """
         B = img_feat.shape[0]
-        flat = self.mlp(img_feat)  # [B, 3*C*H*W]
-        planes = flat.view(
-            B * 3, self.plane_ch, self.plane_res, self.plane_res
-        )  # [B*3, C, H, W]
-        planes = self.refine(planes)
+        flat = self.mlp(img_feat)  # [B, 3*seed_ch*seed_res^2]
+        planes = flat.view(B * 3, self.seed_ch, self.seed_res, self.seed_res)
+        planes = self.refine(planes)  # [B*3, plane_ch, plane_res, plane_res]
         return planes.view(
             B, 3, self.plane_ch, self.plane_res, self.plane_res
         )  # [B, 3, C, H, W]

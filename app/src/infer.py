@@ -55,20 +55,27 @@ def load_model(ckpt_path: str, device: torch.device) -> TriplaneNeRF:
     ckpt = torch.load(ckpt_path, map_location=device)
     state = ckpt.get("model", ckpt)  # support both raw state_dict and wrapped ckpt
 
-    # Infer arch from state dict so we don't need to hard-code it
-    plane_ch = state["generator.refine.0.weight"].shape[0]  # out channels
-    flat_dim = state["generator.mlp.6.weight"].shape[0]  # 3*C*H*W
-    plane_res = int(math.sqrt(flat_dim // (3 * plane_ch)))  # H = W
+    # Infer arch from state dict so we don't need to hard-code it.
+    # Generator now: MLP → seed [seed_ch, seed_res, seed_res] → ConvTranspose ×4 → plane_res.
+    # The final 1×1 conv has out_channels = plane_ch.
+    refine_keys = sorted(
+        k for k in state if k.startswith("generator.refine.") and k.endswith(".weight")
+    )
+    plane_ch = state[refine_keys[-1]].shape[0]  # final 1×1 conv out-channels
+    seed_ch = state["generator.refine.0.weight"].shape[0]  # first conv in-channels
+    flat_dim = state["generator.mlp.6.weight"].shape[0]  # 3 * seed_ch * seed_res^2
+    seed_res = int(math.sqrt(flat_dim // (3 * seed_ch)))
+    plane_res = seed_res * 4  # two ×2 ConvTranspose layers
     nerf_h = state["nerf_mlp.density_net.0.weight"].shape[0]
-    n_samples = 64  # not stored in ckpt — use training default
+    n_samples = 96  # not stored in ckpt — use training default
 
     model = TriplaneNeRF(
         plane_ch=plane_ch,
         plane_res=plane_res,
         nerf_hidden=nerf_h,
         n_samples=n_samples,
-        near=0.5,
-        far=4.5,
+        near=1.5,
+        far=4.0,
     ).to(device)
     model.load_state_dict(state)
     model.eval()
@@ -369,7 +376,7 @@ if __name__ == "__main__":
 
     infer(
         image_path="data/OmniObject3D/render/chair/chair_001/render/images/r_5.png",
-        ckpt_path="checkpoints/triplane_epoch050.pth",
+        ckpt_path="checkpoints/weights/triplane_epoch100.pth",
         out_dir="inference_out",
         n_views=36,
         render_h=256,
