@@ -26,53 +26,56 @@ The synthetic conf is 1.0 at the bandpass centre, 0.0 at its edges, so
 YOLO door/window detections (real conf scores) should always be preferred
 when merging results.
 """
+
 from __future__ import annotations
 
-import cv2
 import math
-import numpy as np
 from typing import Any
+
+import cv2
+import numpy as np
 
 # ── tunable constants (from FloorplanToBlenderLib/const.py) ──────────────────
 
-_MORPH_KERNEL      = (3, 3)
-_MORPH_ITERS       = 2
-_DILATE_ITERS      = 3
-_DIST_THRESH_LO    = 0.5   # fraction of dist-transform for sure-fg
-_DIST_THRESH_HI    = 0.2   # fraction of dist-transform.max() for sure-fg
-_NOISE_AREA        = 50    # min contour area to keep during noise removal
-_HARRIS_BLOCK      = 2
-_HARRIS_K_SIZE     = 3
-_HARRIS_K          = 0.04
+_MORPH_KERNEL = (3, 3)
+_MORPH_ITERS = 2
+_DILATE_ITERS = 3
+_DIST_THRESH_LO = 0.5  # fraction of dist-transform for sure-fg
+_DIST_THRESH_HI = 0.2  # fraction of dist-transform.max() for sure-fg
+_NOISE_AREA = 50  # min contour area to keep during noise removal
+_HARRIS_BLOCK = 2
+_HARRIS_K_SIZE = 3
+_HARRIS_K = 0.04
 _HARRIS_ERODE_ITER = 10
-_CORNERS_THR       = 0.01  # fraction of Harris max
-_CLOSING_MAX_LEN   = 130   # max pixel gap to close between Harris corners
-_GAP_MIN_PX        = 10    # min component size to consider as opening
-_GAP_MAX_PX        = 5_000 # max component size (larger → room, not gap)
-_WIN_LOW           = 0.001
-_WIN_HIGH          = 0.00459
-_WIN_RESCALE       = 1.05  # expand detected window bbox slightly
-_BOX_ACCURACY      = 0.001 # polygon approximation for contours
-_IOU_SUPPRESS_THR  = 0.05  # IoU above which a FM window is suppressed by YOLO
+_CORNERS_THR = 0.01  # fraction of Harris max
+_CLOSING_MAX_LEN = 130  # max pixel gap to close between Harris corners
+_GAP_MIN_PX = 10  # min component size to consider as opening
+_GAP_MAX_PX = 5_000  # max component size (larger → room, not gap)
+_WIN_LOW = 0.001
+_WIN_HIGH = 0.00459
+_WIN_RESCALE = 1.05  # expand detected window bbox slightly
+_BOX_ACCURACY = 0.001  # polygon approximation for contours
+_IOU_SUPPRESS_THR = 0.05  # IoU above which a FM window is suppressed by YOLO
 
 
 # ── image helpers ─────────────────────────────────────────────────────────────
+
 
 def _wall_filter(gray: np.ndarray) -> np.ndarray:
     """
     Reproduce FloorplanToBlenderLib.detect.wall_filter.
     Returns the 'unknown' band between sure-background and sure-foreground.
     """
-    _, thresh = cv2.threshold(gray, 0, 255,
-                              cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+    _, thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
     kernel = np.ones(_MORPH_KERNEL, np.uint8)
-    opening  = cv2.morphologyEx(thresh, cv2.MORPH_OPEN,  kernel, iterations=_MORPH_ITERS)
-    sure_bg  = cv2.dilate(opening, kernel, iterations=_DILATE_ITERS)
-    dist     = cv2.distanceTransform(opening, cv2.DIST_L2, 5)
+    opening = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, kernel, iterations=_MORPH_ITERS)
+    sure_bg = cv2.dilate(opening, kernel, iterations=_DILATE_ITERS)
+    dist = cv2.distanceTransform(opening, cv2.DIST_L2, 5)
     _, sure_fg = cv2.threshold(
         _DIST_THRESH_LO * dist,
         _DIST_THRESH_HI * dist.max(),
-        255, 0,
+        255,
+        0,
     )
     return cv2.subtract(sure_bg, np.uint8(sure_fg))
 
@@ -108,9 +111,9 @@ def _close_corners(img: np.ndarray) -> np.ndarray:
     the same row/column (FloorplanToBlenderLib.__corners_and_draw_lines).
     Mutates img in-place and returns it.
     """
-    dst    = cv2.cornerHarris(img, _HARRIS_BLOCK, _HARRIS_K_SIZE, _HARRIS_K)
+    dst = cv2.cornerHarris(img, _HARRIS_BLOCK, _HARRIS_K_SIZE, _HARRIS_K)
     kernel = np.ones((1, 1), np.uint8)
-    dst    = cv2.erode(dst, kernel, iterations=_HARRIS_ERODE_ITER)
+    dst = cv2.erode(dst, kernel, iterations=_HARRIS_ERODE_ITER)
     active = dst > _CORNERS_THR * dst.max()
 
     for y, row in enumerate(active):
@@ -141,7 +144,7 @@ def _find_gap_components(img: np.ndarray) -> list[np.ndarray]:
     for label in np.unique(labels):
         if label == 0:
             continue
-        comp  = labels == label
+        comp = labels == label
         count = int(np.count_nonzero(comp))
         if _GAP_MIN_PX <= count <= _GAP_MAX_PX:
             components.append(comp)
@@ -150,8 +153,10 @@ def _find_gap_components(img: np.ndarray) -> list[np.ndarray]:
 
 # ── geometry helpers ──────────────────────────────────────────────────────────
 
-def _rescale_bbox(x: float, y: float, w: float, h: float,
-                  factor: float) -> tuple[float, float, float, float]:
+
+def _rescale_bbox(
+    x: float, y: float, w: float, h: float, factor: float
+) -> tuple[float, float, float, float]:
     """Expand a bbox by factor around its centre (transform.rescale_rect)."""
     cx, cy = x + w / 2, y + h / 2
     nw, nh = w * factor, h * factor
@@ -170,6 +175,7 @@ def _iou(b1: tuple, b2: tuple) -> float:
 
 
 # ── public API ────────────────────────────────────────────────────────────────
+
 
 def detect_windows_fm(
     gray_no_text: np.ndarray,
@@ -212,8 +218,8 @@ def detect_windows_fm(
         w, h = int(xs.max()) - x + 1, int(ys.max()) - y + 1
 
         # Step 3 — pixel-density bandpass on original grayscale
-        patch  = gray_no_text[y: y + h, x: x + w]
-        total  = float(np.sum(patch))
+        patch = gray_no_text[y : y + h, x : x + w]
+        total = float(np.sum(patch))
         if total == 0:
             continue
         density = float(np.sum(patch > 0)) / total
@@ -224,15 +230,15 @@ def detect_windows_fm(
         # Rescale bbox to better fit the window symbol outline
         rx, ry, rw, rh = _rescale_bbox(x, y, w, h, _WIN_RESCALE)
         x1, y1, x2, y2 = rx, ry, rx + rw, ry + rh
-        cx_w, cy_w     = (x1 + x2) / 2, (y1 + y2) / 2
-        bbox           = (x1, y1, x2, y2)
+        cx_w, cy_w = (x1 + x2) / 2, (y1 + y2) / 2
+        bbox = (x1, y1, x2, y2)
 
         # Step 4 — suppress if overlaps any higher-priority YOLO detection
         if any(_iou(bbox, eb) > iou_threshold for eb in existing_bboxes):
             continue
 
         # Synthetic conf: 1.0 at bandpass midpoint, 0.0 at edges
-        mid  = (_WIN_LOW + _WIN_HIGH) / 2.0
+        mid = (_WIN_LOW + _WIN_HIGH) / 2.0
         half = (_WIN_HIGH - _WIN_LOW) / 2.0
         conf = round(1.0 - abs(density - mid) / half, 3)
 

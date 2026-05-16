@@ -23,26 +23,29 @@ SNAP_PX = 20  # bbox proximity (px) to count a corner as "touching" an opening
 
 @dataclass
 class SkeletonGraph:
-    skeleton_raw: np.ndarray        # 1-px binary skeleton
-    skeleton_thick: np.ndarray      # dilated skeleton used for corner detection
+    skeleton_raw: np.ndarray  # 1-px binary skeleton
+    skeleton_thick: np.ndarray  # dilated skeleton used for corner detection
     corners: list[tuple[int, int]]  # NMS-filtered corners snapped onto skeleton
-    graph: nx.Graph                 # undirected wall graph (nodes=corners, edges=walls)
+    graph: nx.Graph  # undirected wall graph (nodes=corners, edges=walls)
 
 
 @dataclass
 class FloorPlanOutput:
     prep: PipelineResult
     skel: SkeletonGraph
-    graph: nx.Graph                 # combined graph: corner + opening nodes
-    json: dict[str, Any]            # structured JSON ready for export
+    graph: nx.Graph  # combined graph: corner + opening nodes
+    json: dict[str, Any]  # structured JSON ready for export
 
 
 # ── Binary cleanup helpers ────────────────────────────────────────────────────
 
+
 def _remove_noise(binary: np.ndarray, min_area_ratio: float = 0.0001) -> np.ndarray:
     h, w = binary.shape
     min_area = max(50, int(h * w * min_area_ratio))
-    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(binary, connectivity=8)
+    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(
+        binary, connectivity=8
+    )
     cleaned = np.zeros_like(binary)
     for label_id in range(1, num_labels):
         if stats[label_id, cv2.CC_STAT_AREA] >= min_area:
@@ -59,6 +62,7 @@ def _morphological_cleanup(binary: np.ndarray, kernel_size: int = 3) -> np.ndarr
 
 
 # ── Corner detection helpers ──────────────────────────────────────────────────
+
 
 def _detect_corners_polygon(
     binary: np.ndarray,
@@ -77,7 +81,9 @@ def _detect_corners_polygon(
     return corners
 
 
-def _suppress_neighbors(corners: list[tuple[int, int]], radius: int = 25) -> list[tuple[int, int]]:
+def _suppress_neighbors(
+    corners: list[tuple[int, int]], radius: int = 25
+) -> list[tuple[int, int]]:
     kept: list[tuple[int, int]] = []
     suppressed: set[int] = set()
     for i, (x0, y0) in enumerate(corners):
@@ -86,7 +92,7 @@ def _suppress_neighbors(corners: list[tuple[int, int]], radius: int = 25) -> lis
         kept.append((x0, y0))
         for j, (x1, y1) in enumerate(corners):
             if j != i and j not in suppressed:
-                if (x1 - x0) ** 2 + (y1 - y0) ** 2 <= radius ** 2:
+                if (x1 - x0) ** 2 + (y1 - y0) ** 2 <= radius**2:
                     suppressed.add(j)
     return kept
 
@@ -98,7 +104,7 @@ def _snap_to_skeleton(
 ) -> list[tuple[int, int]]:
     H, W = skeleton_1px.shape
     snapped: list[tuple[int, int]] = []
-    for (x, y) in corners:
+    for x, y in corners:
         x, y = int(x), int(y)
         x0, x1 = max(0, x - search_radius), min(W, x + search_radius + 1)
         y0, y1 = max(0, y - search_radius), min(H, y + search_radius + 1)
@@ -113,6 +119,7 @@ def _snap_to_skeleton(
 
 
 # ── BFS edge discovery ────────────────────────────────────────────────────────
+
 
 def _bfs_edges(
     corners: list[tuple[int, int]],
@@ -154,6 +161,7 @@ def _bfs_edges(
 
 # ── YOLO detection ───────────────────────────────────────────────────────────
 
+
 def detect_openings(
     model: YOLO,
     color_bgr: np.ndarray,
@@ -174,13 +182,15 @@ def detect_openings(
         if label not in OPENING_CLASSES:
             continue
         x1, y1, x2, y2 = box.xyxy[0].tolist()
-        openings.append(dict(
-            label=label,
-            cx=(x1 + x2) / 2,
-            cy=(y1 + y2) / 2,
-            bbox=(x1, y1, x2, y2),
-            conf=float(box.conf),
-        ))
+        openings.append(
+            dict(
+                label=label,
+                cx=(x1 + x2) / 2,
+                cy=(y1 + y2) / 2,
+                bbox=(x1, y1, x2, y2),
+                conf=float(box.conf),
+            )
+        )
     return openings
 
 
@@ -193,9 +203,9 @@ def _gap_corners(G: nx.Graph, x1: float, y1: float, x2: float, y2: float) -> lis
     Returns at most one node-id per side (up to 4 total, deduped).
     """
     sides: list[tuple[str, list[tuple[float, int]]]] = [
-        ("left",   []),
-        ("right",  []),
-        ("top",    []),
+        ("left", []),
+        ("right", []),
+        ("top", []),
         ("bottom", []),
     ]
 
@@ -204,14 +214,26 @@ def _gap_corners(G: nx.Graph, x1: float, y1: float, x2: float, y2: float) -> lis
             continue
         cx, cy = attr["x"], attr["y"]
 
-        if (x1 - SNAP_PX) <= cx <= (x1 + SNAP_PX) and (y1 - SNAP_PX) <= cy <= (y2 + SNAP_PX):
-            sides[0][1].append((cx, n))          # left: sort ascending → closest to x1
-        if (x2 - SNAP_PX) <= cx <= (x2 + SNAP_PX) and (y1 - SNAP_PX) <= cy <= (y2 + SNAP_PX):
-            sides[1][1].append((-cx, n))         # right: sort ascending → closest to x2 (largest cx)
-        if (y1 - SNAP_PX) <= cy <= (y1 + SNAP_PX) and (x1 - SNAP_PX) <= cx <= (x2 + SNAP_PX):
-            sides[2][1].append((cy, n))          # top: sort ascending → closest to y1
-        if (y2 - SNAP_PX) <= cy <= (y2 + SNAP_PX) and (x1 - SNAP_PX) <= cx <= (x2 + SNAP_PX):
-            sides[3][1].append((-cy, n))         # bottom: sort ascending → closest to y2 (largest cy)
+        if (x1 - SNAP_PX) <= cx <= (x1 + SNAP_PX) and (y1 - SNAP_PX) <= cy <= (
+            y2 + SNAP_PX
+        ):
+            sides[0][1].append((cx, n))  # left: sort ascending → closest to x1
+        if (x2 - SNAP_PX) <= cx <= (x2 + SNAP_PX) and (y1 - SNAP_PX) <= cy <= (
+            y2 + SNAP_PX
+        ):
+            sides[1][1].append(
+                (-cx, n)
+            )  # right: sort ascending → closest to x2 (largest cx)
+        if (y1 - SNAP_PX) <= cy <= (y1 + SNAP_PX) and (x1 - SNAP_PX) <= cx <= (
+            x2 + SNAP_PX
+        ):
+            sides[2][1].append((cy, n))  # top: sort ascending → closest to y1
+        if (y2 - SNAP_PX) <= cy <= (y2 + SNAP_PX) and (x1 - SNAP_PX) <= cx <= (
+            x2 + SNAP_PX
+        ):
+            sides[3][1].append(
+                (-cy, n)
+            )  # bottom: sort ascending → closest to y2 (largest cy)
 
     selected: list[int] = []
     seen: set[int] = set()
@@ -254,13 +276,17 @@ def attach_openings(G: nx.Graph, openings: list[dict[str, Any]]) -> nx.Graph:
                     best_d2, best_node = d2, n
             gap = [best_node] if best_node is not None else []
 
-        G.add_node(next_id, x=cx, y=cy, kind=det["label"], bbox=det["bbox"], conf=det["conf"])
+        G.add_node(
+            next_id, x=cx, y=cy, kind=det["label"], bbox=det["bbox"], conf=det["conf"]
+        )
 
         if len(gap) >= 2:
             # Direct corner-to-corner edge; opening_node links back to metadata
             a, b = gap[0], gap[1]
-            dist = ((G.nodes[a]["x"] - G.nodes[b]["x"]) ** 2 +
-                    (G.nodes[a]["y"] - G.nodes[b]["y"]) ** 2) ** 0.5
+            dist = (
+                (G.nodes[a]["x"] - G.nodes[b]["x"]) ** 2
+                + (G.nodes[a]["y"] - G.nodes[b]["y"]) ** 2
+            ) ** 0.5
             G.add_edge(a, b, length=dist, kind="opening", opening_node=next_id)
         else:
             for nid in gap:
@@ -274,10 +300,13 @@ def attach_openings(G: nx.Graph, openings: list[dict[str, Any]]) -> nx.Graph:
 
 # ── JSON export ───────────────────────────────────────────────────────────────
 
+
 def _opening_offset_and_width(
     bbox: tuple,
-    wx1: float, wy1: float,
-    wx2: float, wy2: float,
+    wx1: float,
+    wy1: float,
+    wx2: float,
+    wy2: float,
 ) -> tuple[float, float]:
     """
     Project an opening bbox onto a wall line segment.
@@ -288,8 +317,8 @@ def _opening_offset_and_width(
     Both values are clamped to [0, wall_length].
     """
     x1, y1, x2, y2 = bbox
-    dx, dy   = wx2 - wx1, wy2 - wy1
-    wall_len = (dx ** 2 + dy ** 2) ** 0.5
+    dx, dy = wx2 - wx1, wy2 - wy1
+    wall_len = (dx**2 + dy**2) ** 0.5
     if wall_len == 0:
         return 0.0, 0.0
     ux, uy = dx / wall_len, dy / wall_len
@@ -304,7 +333,8 @@ def _opening_offset_and_width(
 
 
 def _nearest_wall_id(
-    cx: float, cy: float,
+    cx: float,
+    cy: float,
     wall_records: list[dict],
 ) -> str | None:
     """Return the id of the wall whose line is closest to (cx, cy)."""
@@ -315,10 +345,10 @@ def _nearest_wall_id(
         lsq = dx * dx + dy * dy
         if lsq == 0:
             continue
-        t   = max(0.0, min(1.0, ((cx - wx1) * dx + (cy - wy1) * dy) / lsq))
-        px  = wx1 + t * dx
-        py  = wy1 + t * dy
-        d   = ((cx - px) ** 2 + (cy - py) ** 2) ** 0.5
+        t = max(0.0, min(1.0, ((cx - wx1) * dx + (cy - wy1) * dy) / lsq))
+        px = wx1 + t * dx
+        py = wy1 + t * dy
+        d = ((cx - px) ** 2 + (cy - py) ** 2) ** 0.5
         if d < best_d:
             best_d, best_id = d, w["id"]
     return best_id
@@ -355,16 +385,17 @@ def graph_to_json(G: nx.Graph) -> dict[str, Any]:
 
     # ── wall merging ──────────────────────────────────────────────────────────
     absorbed: set[frozenset] = set()
-    wall_records: list[dict] = []   # internal dicts with _x1/_y1/_x2/_y2 for math
+    wall_records: list[dict] = []  # internal dicts with _x1/_y1/_x2/_y2 for math
     node_to_wall: dict[int, str] = {}  # opening_node_id → wall_id
     wall_idx = 0
 
     for ca, cb, nid in opening_edges:
+
         def _wall_nbrs(node: int) -> list[int]:
             return [
-                nb for nb in G.neighbors(node)
-                if G.nodes[nb]["kind"] == "corner"
-                and G[node][nb].get("kind") == "wall"
+                nb
+                for nb in G.neighbors(node)
+                if G.nodes[nb]["kind"] == "corner" and G[node][nb].get("kind") == "wall"
             ]
 
         nbrs_a = _wall_nbrs(ca)
@@ -372,18 +403,20 @@ def graph_to_json(G: nx.Graph) -> dict[str, Any]:
         if not nbrs_a or not nbrs_b:
             continue
 
-        dx_gap  = G.nodes[cb]["x"] - G.nodes[ca]["x"]
-        dy_gap  = G.nodes[cb]["y"] - G.nodes[ca]["y"]
-        gap_len = (dx_gap ** 2 + dy_gap ** 2) ** 0.5 or 1.0
+        dx_gap = G.nodes[cb]["x"] - G.nodes[ca]["x"]
+        dy_gap = G.nodes[cb]["y"] - G.nodes[ca]["y"]
+        gap_len = (dx_gap**2 + dy_gap**2) ** 0.5 or 1.0
 
         def _best(node: int, nbrs: list[int]) -> int | None:
             best_n, best_s = None, -1.0
             for nb in nbrs:
                 dx = G.nodes[node]["x"] - G.nodes[nb]["x"]
                 dy = G.nodes[node]["y"] - G.nodes[nb]["y"]
-                seg_len = (dx ** 2 + dy ** 2) ** 0.5 or 1.0
-                score   = abs((dx / seg_len) * (dx_gap / gap_len) +
-                              (dy / seg_len) * (dy_gap / gap_len))
+                seg_len = (dx**2 + dy**2) ** 0.5 or 1.0
+                score = abs(
+                    (dx / seg_len) * (dx_gap / gap_len)
+                    + (dy / seg_len) * (dy_gap / gap_len)
+                )
                 if score > best_s:
                     best_s, best_n = score, nb
             return best_n if best_s > 0.85 else None
@@ -400,12 +433,17 @@ def graph_to_json(G: nx.Graph) -> dict[str, Any]:
         wid = f"wall_{wall_idx}"
         px, py = G.nodes[p]["x"], G.nodes[p]["y"]
         qx, qy = G.nodes[q]["x"], G.nodes[q]["y"]
-        wall_records.append({
-            "id":    wid,
-            "start": {"x": px, "y": py},
-            "end":   {"x": qx, "y": qy},
-            "_x1": px, "_y1": py, "_x2": qx, "_y2": qy,
-        })
+        wall_records.append(
+            {
+                "id": wid,
+                "start": {"x": px, "y": py},
+                "end": {"x": qx, "y": qy},
+                "_x1": px,
+                "_y1": py,
+                "_x2": qx,
+                "_y2": qy,
+            }
+        )
         node_to_wall[nid] = wid
 
     # ── remaining (non-absorbed) wall edges ───────────────────────────────────
@@ -415,12 +453,17 @@ def graph_to_json(G: nx.Graph) -> dict[str, Any]:
             wid = f"wall_{wall_idx}"
             ax, ay = G.nodes[a]["x"], G.nodes[a]["y"]
             bx, by = G.nodes[b]["x"], G.nodes[b]["y"]
-            wall_records.append({
-                "id":    wid,
-                "start": {"x": ax, "y": ay},
-                "end":   {"x": bx, "y": by},
-                "_x1": ax, "_y1": ay, "_x2": bx, "_y2": by,
-            })
+            wall_records.append(
+                {
+                    "id": wid,
+                    "start": {"x": ax, "y": ay},
+                    "end": {"x": bx, "y": by},
+                    "_x1": ax,
+                    "_y1": ay,
+                    "_x2": bx,
+                    "_y2": by,
+                }
+            )
 
     # ── openings ──────────────────────────────────────────────────────────────
     wall_by_id = {w["id"]: w for w in wall_records}
@@ -431,7 +474,7 @@ def graph_to_json(G: nx.Graph) -> dict[str, Any]:
         if attr["kind"] == "corner":
             continue
 
-        cx, cy      = attr["x"], attr["y"]
+        cx, cy = attr["x"], attr["y"]
         x1, y1, x2, y2 = attr["bbox"]
 
         # prefer the wall this opening was merged into; fall back to nearest
@@ -442,25 +485,33 @@ def graph_to_json(G: nx.Graph) -> dict[str, Any]:
         w = wall_by_id[wid]
         offset, width = _opening_offset_and_width(
             (x1, y1, x2, y2),
-            w["_x1"], w["_y1"], w["_x2"], w["_y2"],
+            w["_x1"],
+            w["_y1"],
+            w["_x2"],
+            w["_y2"],
         )
 
         opening_idx += 1
         kind = "door" if attr["kind"] in ("door", "2door") else "window"
-        openings.append({
-            "id":     f"opening_{opening_idx}",
-            "wallId": wid,
-            "offset": offset,
-            "width":  width,
-            "type":   kind,
-        })
+        openings.append(
+            {
+                "id": f"opening_{opening_idx}",
+                "wallId": wid,
+                "offset": offset,
+                "width": width,
+                "type": kind,
+            }
+        )
 
     # strip internal geometry keys before returning
-    walls = [{"id": w["id"], "start": w["start"], "end": w["end"]} for w in wall_records]
+    walls = [
+        {"id": w["id"], "start": w["start"], "end": w["end"]} for w in wall_records
+    ]
     return {"walls": walls, "openings": openings}
 
 
 # ── Public API ────────────────────────────────────────────────────────────────
+
 
 def build_skeleton_graph(
     preprocessed: np.ndarray,
@@ -500,7 +551,9 @@ def build_skeleton_graph(
     skeleton_thick = cv2.dilate(skeleton_raw, k)
 
     # Corner detection → NMS → snap onto 1-px skeleton
-    poly_corners = _detect_corners_polygon(skeleton_thick, min_area=min_area, epsilon_ratio=epsilon_ratio)
+    poly_corners = _detect_corners_polygon(
+        skeleton_thick, min_area=min_area, epsilon_ratio=epsilon_ratio
+    )
     kept_corners = _suppress_neighbors(poly_corners, radius=nms_radius)
     snapped = _snap_to_skeleton(kept_corners, skeleton_raw, search_radius=snap_radius)
 
@@ -565,7 +618,7 @@ def run_pipeline(
     gray = cv2.cvtColor(prep.raw_no_text, cv2.COLOR_BGR2GRAY)
     yolo_bboxes = [det["bbox"] for det in openings]
     fm_windows = detect_windows_fm(gray, existing_bboxes=yolo_bboxes)
-    openings = openings + fm_windows   # YOLO first (higher conf / priority)
+    openings = openings + fm_windows  # YOLO first (higher conf / priority)
 
     # Work on a copy so skel.graph stays pure (corners + walls only)
     combined = skel.graph.copy()
@@ -582,7 +635,7 @@ def run_pipeline(
 # ── CLI entry point ───────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    img_path   = sys.argv[1] if len(sys.argv) > 1 else "data/PNG/raw/IIa_A01001.png"
+    img_path = sys.argv[1] if len(sys.argv) > 1 else "data/PNG/raw/IIa_A01001.png"
     model_path = sys.argv[2] if len(sys.argv) > 2 else "Models/best_v2.pt"
 
     image = cv2.imread(img_path)
@@ -590,9 +643,9 @@ if __name__ == "__main__":
         raise FileNotFoundError(img_path)
 
     out = run_pipeline(image, model_path=model_path)
-    G   = out.graph
+    G = out.graph
 
-    n_doors   = sum(1 for o in out.json["openings"] if o["type"] == "door")
+    n_doors = sum(1 for o in out.json["openings"] if o["type"] == "door")
     n_windows = sum(1 for o in out.json["openings"] if o["type"] == "window")
     print(f"rotation_angle : {out.prep.rotation_angle}°")
     print(f"crop_bbox      : {out.prep.crop_bbox}")
@@ -603,12 +656,12 @@ if __name__ == "__main__":
     print(f"graph          : {G.number_of_nodes()} nodes, {G.number_of_edges()} edges")
 
     out_dir = Path("data/PNG")
-    stem    = Path(img_path).stem
+    stem = Path(img_path).stem
 
     (out_dir / "no_text").mkdir(parents=True, exist_ok=True)
     (out_dir / "crop_and_pad").mkdir(parents=True, exist_ok=True)
 
-    cv2.imwrite(str(out_dir / "no_text"      / f"{stem}.png"), out.prep.raw_no_text)
+    cv2.imwrite(str(out_dir / "no_text" / f"{stem}.png"), out.prep.raw_no_text)
     cv2.imwrite(str(out_dir / "crop_and_pad" / f"{stem}.png"), out.prep.preprocessed)
 
     # Overlay: skeleton + wall edges + opening bboxes
@@ -626,8 +679,15 @@ if __name__ == "__main__":
         if "bbox" in attr:
             x1, y1, x2, y2 = (int(v) for v in attr["bbox"])
             cv2.rectangle(vis, (x1, y1), (x2, y2), (0, 165, 255), 2)
-            cv2.putText(vis, f"{attr['kind']} {attr['conf']:.2f}",
-                        (x1, y1 - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 165, 255), 1)
+            cv2.putText(
+                vis,
+                f"{attr['kind']} {attr['conf']:.2f}",
+                (x1, y1 - 6),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.5,
+                (0, 165, 255),
+                1,
+            )
 
     overlay_path = str(out_dir / f"{stem}_graph.png")
     cv2.imwrite(overlay_path, vis)

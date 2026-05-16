@@ -1,10 +1,11 @@
 from __future__ import annotations
+
 from dataclasses import dataclass
 from pathlib import Path
 
 import cv2
-import numpy as np
 import easyocr
+import numpy as np
 
 
 @dataclass
@@ -18,6 +19,7 @@ class PipelineResult:
     Supports tuple unpacking:
         raw_no_text, preprocessed = preprocessor.process(image)
     """
+
     raw_no_text: np.ndarray
     preprocessed: np.ndarray
     rotation_angle: int
@@ -88,7 +90,9 @@ class FloorPlanPreprocessor:
         # Stage 3: crop the binary image; raw_no_text is kept uncropped
         preprocessed, crop_bbox = self._crop_and_pad(binary, self.crop_padding)
 
-        raw_no_text_cropped = raw_no_text[crop_bbox[1]:crop_bbox[3], crop_bbox[0]:crop_bbox[2]]
+        raw_no_text_cropped = raw_no_text[
+            crop_bbox[1] : crop_bbox[3], crop_bbox[0] : crop_bbox[2]
+        ]
 
         return PipelineResult(
             raw_no_text=raw_no_text_cropped,
@@ -105,12 +109,12 @@ class FloorPlanPreprocessor:
         angle_counts: dict[int, int] = {}
 
         for angle in range(0, 360, self.angle_step):
-            rotated    = self._rotate(image, angle)
+            rotated = self._rotate(image, angle)
             detections = self._detect_text(rotated)
             angle_counts[angle] = len(detections)
             if not detections:
                 continue
-            rot_mask  = self._build_mask(rotated, detections)
+            rot_mask = self._build_mask(rotated, detections)
             orig_mask = self._rotate_mask_back(rot_mask, image.shape, angle)
             combined_mask = cv2.bitwise_or(combined_mask, orig_mask)
 
@@ -139,10 +143,12 @@ class FloorPlanPreprocessor:
     @staticmethod
     def _enhance(image: np.ndarray, gaussian_ksize: int = 5) -> np.ndarray:
         """Grayscale → Gaussian blur → Otsu binarisation."""
-        gray    = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-        k       = gaussian_ksize | 1  # ensure odd
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        k = gaussian_ksize | 1  # ensure odd
         blurred = cv2.GaussianBlur(gray, (k, k), 0)
-        _, binary = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+        _, binary = cv2.threshold(
+            blurred, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU
+        )
         return binary
 
     # ── Stage 3: crop & pad ───────────────────────────────────────────────────
@@ -176,23 +182,33 @@ class FloorPlanPreprocessor:
         new_h = int(h * cos + w * sin)
         M[0, 2] += (new_w / 2) - cx
         M[1, 2] += (new_h / 2) - cy
-        return cv2.warpAffine(image, M, (new_w, new_h),
-                              flags=cv2.INTER_LINEAR,
-                              borderMode=cv2.BORDER_CONSTANT,
-                              borderValue=(255, 255, 255))
+        return cv2.warpAffine(
+            image,
+            M,
+            (new_w, new_h),
+            flags=cv2.INTER_LINEAR,
+            borderMode=cv2.BORDER_CONSTANT,
+            borderValue=(255, 255, 255),
+        )
 
     @staticmethod
-    def _rotate_mask_back(mask: np.ndarray, original_shape: tuple, angle: int) -> np.ndarray:
+    def _rotate_mask_back(
+        mask: np.ndarray, original_shape: tuple, angle: int
+    ) -> np.ndarray:
         h_rot, w_rot = mask.shape[:2]
         h_orig, w_orig = original_shape[:2]
         cx, cy = w_rot / 2, h_rot / 2
         M = cv2.getRotationMatrix2D((cx, cy), angle, 1.0)
         M[0, 2] += (w_orig / 2) - cx
         M[1, 2] += (h_orig / 2) - cy
-        return cv2.warpAffine(mask, M, (w_orig, h_orig),
-                              flags=cv2.INTER_NEAREST,
-                              borderMode=cv2.BORDER_CONSTANT,
-                              borderValue=0)
+        return cv2.warpAffine(
+            mask,
+            M,
+            (w_orig, h_orig),
+            flags=cv2.INTER_NEAREST,
+            borderMode=cv2.BORDER_CONSTANT,
+            borderValue=0,
+        )
 
     @staticmethod
     def _erase(image: np.ndarray, mask: np.ndarray) -> np.ndarray:
@@ -218,7 +234,7 @@ if __name__ == "__main__":
     x1, y1, x2, y2 = result.crop_bbox
     cropped_color = result.raw_no_text[y1:y2, x1:x2]
 
-    cv2.imwrite(str(out_dir / "no_text"      / f"{stem}.png"), result.raw_no_text)
+    cv2.imwrite(str(out_dir / "no_text" / f"{stem}.png"), result.raw_no_text)
     cv2.imwrite(str(out_dir / "crop_and_pad" / f"{stem}.png"), result.preprocessed)
 
     print(f"rotation_angle : {result.rotation_angle}°")

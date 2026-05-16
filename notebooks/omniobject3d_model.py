@@ -3,6 +3,7 @@
 
 # %%
 import torch
+
 torch.backends.quantized.engine = "qnnpack"
 
 import numpy as np
@@ -30,20 +31,36 @@ from torch import nn
 
 
 def get_unit_cube():
-    v = torch.tensor([
-        [-0.5, -0.5, -0.5], [ 0.5, -0.5, -0.5],
-        [ 0.5,  0.5, -0.5], [-0.5,  0.5, -0.5],
-        [-0.5, -0.5,  0.5], [ 0.5, -0.5,  0.5],
-        [ 0.5,  0.5,  0.5], [-0.5,  0.5,  0.5],
-    ], dtype=torch.float32)
-    f = torch.tensor([
-        [0,1,2],[0,2,3],
-        [4,6,5],[4,7,6],
-        [0,4,5],[0,5,1],
-        [2,6,7],[2,7,3],
-        [0,7,4],[0,3,7],
-        [1,5,6],[1,6,2],
-    ], dtype=torch.long)
+    v = torch.tensor(
+        [
+            [-0.5, -0.5, -0.5],
+            [0.5, -0.5, -0.5],
+            [0.5, 0.5, -0.5],
+            [-0.5, 0.5, -0.5],
+            [-0.5, -0.5, 0.5],
+            [0.5, -0.5, 0.5],
+            [0.5, 0.5, 0.5],
+            [-0.5, 0.5, 0.5],
+        ],
+        dtype=torch.float32,
+    )
+    f = torch.tensor(
+        [
+            [0, 1, 2],
+            [0, 2, 3],
+            [4, 6, 5],
+            [4, 7, 6],
+            [0, 4, 5],
+            [0, 5, 1],
+            [2, 6, 7],
+            [2, 7, 3],
+            [0, 7, 4],
+            [0, 3, 7],
+            [1, 5, 6],
+            [1, 6, 2],
+        ],
+        dtype=torch.long,
+    )
     return v, f
 
 
@@ -62,8 +79,8 @@ def loop_subdivide(vertices, faces):
     new_faces = []
     for tri in faces.numpy():
         v0, v1, v2 = int(tri[0]), int(tri[1]), int(tri[2])
-        m01, m12, m20 = midpoint(v0,v1), midpoint(v1,v2), midpoint(v2,v0)
-        new_faces += [[v0,m01,m20],[v1,m12,m01],[v2,m20,m12],[m01,m12,m20]]
+        m01, m12, m20 = midpoint(v0, v1), midpoint(v1, v2), midpoint(v2, v0)
+        new_faces += [[v0, m01, m20], [v1, m12, m01], [v2, m20, m12], [m01, m12, m20]]
 
     new_v = torch.cat([vertices, torch.stack(mids).to(device)], 0) if mids else vertices
     new_f = torch.tensor(new_faces, dtype=torch.long, device=device)
@@ -75,7 +92,7 @@ def build_adjacency(vertices, faces):
     adj = torch.zeros(V, V)
     for tri in faces:
         for i in range(3):
-            a, b = int(tri[i]), int(tri[(i+1)%3])
+            a, b = int(tri[i]), int(tri[(i + 1) % 3])
             adj[a, b] = adj[b, a] = 1.0
     adj += torch.eye(V)
     return adj / adj.sum(1, keepdim=True).clamp(min=1)
@@ -86,7 +103,7 @@ def build_laplacian(vertices, faces):
     adj = torch.zeros(V, V)
     for tri in faces:
         for i in range(3):
-            a, b = int(tri[i]), int(tri[(i+1)%3])
+            a, b = int(tri[i]), int(tri[(i + 1) % 3])
             adj[a, b] = adj[b, a] = 1.0
     return torch.eye(V) - adj / adj.sum(1, keepdim=True).clamp(1)
 
@@ -95,8 +112,12 @@ v0, f0 = get_unit_cube()
 v1, f1 = loop_subdivide(v0, f0)
 v2, f2 = loop_subdivide(v1, f1)
 v3, f3 = loop_subdivide(v2, f2)
-for label, v, f in [("Cube     ", v0, f0), ("Subdiv×1 ", v1, f1),
-                     ("Subdiv×2 ", v2, f2), ("Subdiv×3 ", v3, f3)]:
+for label, v, f in [
+    ("Cube     ", v0, f0),
+    ("Subdiv×1 ", v1, f1),
+    ("Subdiv×2 ", v2, f2),
+    ("Subdiv×3 ", v3, f3),
+]:
     print(f"  {label}: {v.shape[0]:4d} verts, {f.shape[0]:4d} faces")
 
 # %% [markdown]
@@ -106,6 +127,7 @@ for label, v, f in [("Cube     ", v0, f0), ("Subdiv×1 ", v1, f1),
 #
 # OmniObject3D uses NeRF-convention c2w matrices; `omniobject3d_dinov2.py`
 # converts them to `(R, T)` world-to-camera form so these functions work as-is.
+
 
 # %%
 def project_vertices(vertices, rot, trans, focal):
@@ -134,10 +156,12 @@ def sample_features(feature_maps, coords):
     grid = coords.unsqueeze(1)  # [B, 1, V, 2]
     sampled = []
     for fm in feature_maps:
-        s = F.grid_sample(fm, grid, align_corners=True, mode="bilinear",
-                          padding_mode="border")        # [B, C, 1, V]
+        s = F.grid_sample(
+            fm, grid, align_corners=True, mode="bilinear", padding_mode="border"
+        )  # [B, C, 1, V]
         sampled.append(s.squeeze(2).permute(0, 2, 1))  # [B, V, C]
-    return torch.cat(sampled, dim=-1)                  # [B, V, sum_C]
+    return torch.cat(sampled, dim=-1)  # [B, V, sum_C]
+
 
 # %% [markdown]
 # ## DINOv2 + FPN Encoder
@@ -162,7 +186,7 @@ def sample_features(feature_maps, coords):
 # %%
 _DINOV2_MODEL = "dinov2_vitb14"
 _FPN_CHANNELS = 512
-_TAP_BLOCKS   = [2, 5, 8, 11]
+_TAP_BLOCKS = [2, 5, 8, 11]
 
 
 class DINOv2FPNEncoder(nn.Module):
@@ -185,22 +209,26 @@ class DINOv2FPNEncoder(nn.Module):
             for p in self.dino.parameters():
                 p.requires_grad = False
 
-        self.lateral = nn.ModuleList([
-            nn.Sequential(
-                nn.Conv2d(embed_dim, _FPN_CHANNELS, 1, bias=False),
-                nn.BatchNorm2d(_FPN_CHANNELS),
-                nn.ReLU(inplace=True),
-            )
-            for _ in _TAP_BLOCKS
-        ])
-        self.output_convs = nn.ModuleList([
-            nn.Sequential(
-                nn.Conv2d(_FPN_CHANNELS, _FPN_CHANNELS, 3, padding=1, bias=False),
-                nn.BatchNorm2d(_FPN_CHANNELS),
-                nn.ReLU(inplace=True),
-            )
-            for _ in _TAP_BLOCKS
-        ])
+        self.lateral = nn.ModuleList(
+            [
+                nn.Sequential(
+                    nn.Conv2d(embed_dim, _FPN_CHANNELS, 1, bias=False),
+                    nn.BatchNorm2d(_FPN_CHANNELS),
+                    nn.ReLU(inplace=True),
+                )
+                for _ in _TAP_BLOCKS
+            ]
+        )
+        self.output_convs = nn.ModuleList(
+            [
+                nn.Sequential(
+                    nn.Conv2d(_FPN_CHANNELS, _FPN_CHANNELS, 3, padding=1, bias=False),
+                    nn.BatchNorm2d(_FPN_CHANNELS),
+                    nn.ReLU(inplace=True),
+                )
+                for _ in _TAP_BLOCKS
+            ]
+        )
         self.feat_dims = [_FPN_CHANNELS] * 4  # [512, 512, 512, 512]
 
         with torch.no_grad():
@@ -214,6 +242,7 @@ class DINOv2FPNEncoder(nn.Module):
     def _make_hook(self, blk_idx):
         def hook(module, input, output):
             self._feats[blk_idx] = output[:, 1:, :]
+
         return hook
 
     def _patch_tokens_to_spatial(self, tokens, h_patches, w_patches):
@@ -230,22 +259,26 @@ class DINOv2FPNEncoder(nn.Module):
 
         laterals = []
         for i, blk_idx in enumerate(_TAP_BLOCKS):
-            spatial = self._patch_tokens_to_spatial(
-                self._feats[blk_idx], h_p, w_p)
+            spatial = self._patch_tokens_to_spatial(self._feats[blk_idx], h_p, w_p)
             laterals.append(self.lateral[i](spatial))
 
         fpn = [None] * 4
         fpn[3] = laterals[3]
         for i in range(2, -1, -1):
-            upsampled = F.interpolate(fpn[i+1], size=laterals[i].shape[-2:],
-                                      mode="nearest")
+            upsampled = F.interpolate(
+                fpn[i + 1], size=laterals[i].shape[-2:], mode="nearest"
+            )
             fpn[i] = laterals[i] + upsampled
 
         target_sizes = [128, 64, 32, 16]
         out = []
         for i in range(4):
-            fm = F.interpolate(fpn[i], size=(target_sizes[i], target_sizes[i]),
-                               mode="bilinear", align_corners=False)
+            fm = F.interpolate(
+                fpn[i],
+                size=(target_sizes[i], target_sizes[i]),
+                mode="bilinear",
+                align_corners=False,
+            )
             out.append(self.output_convs[i](fm))
         return out
 
@@ -257,30 +290,34 @@ encoder = DINOv2FPNEncoder(freeze_backbone=True).to(DEVICE)
 #
 # Carried over from `pix2mesh_dinov2.py` unchanged.
 
+
 # %%
 class GraphConv(nn.Module):
     def __init__(self, in_dim, out_dim):
         super().__init__()
-        self.fc_self  = nn.Linear(in_dim, out_dim, bias=False)
+        self.fc_self = nn.Linear(in_dim, out_dim, bias=False)
         self.fc_neigh = nn.Linear(in_dim, out_dim, bias=False)
-        self.bn   = nn.BatchNorm1d(out_dim)
+        self.bn = nn.BatchNorm1d(out_dim)
         self.bias = nn.Parameter(torch.zeros(out_dim))
 
     def forward(self, x, adj):
         B, V, _ = x.shape
         neigh = torch.einsum("vw,bwf->bvf", adj, x)
         out = self.fc_self(x) + self.fc_neigh(neigh) + self.bias
-        out = self.bn(out.reshape(B*V, -1)).reshape(B, V, -1)
+        out = self.bn(out.reshape(B * V, -1)).reshape(B, V, -1)
         return F.relu(out)
 
 
 class GCNBlock(nn.Module):
     def __init__(self, in_dim, hidden_dim):
         super().__init__()
-        self.gc1  = GraphConv(in_dim, hidden_dim)
-        self.gc2  = GraphConv(hidden_dim, hidden_dim)
-        self.skip = nn.Linear(in_dim, hidden_dim, bias=False) \
-                    if in_dim != hidden_dim else nn.Identity()
+        self.gc1 = GraphConv(in_dim, hidden_dim)
+        self.gc2 = GraphConv(hidden_dim, hidden_dim)
+        self.skip = (
+            nn.Linear(in_dim, hidden_dim, bias=False)
+            if in_dim != hidden_dim
+            else nn.Identity()
+        )
 
     def forward(self, x, adj):
         return self.gc2(self.gc1(x, adj), adj) + self.skip(x)
@@ -289,10 +326,12 @@ class GCNBlock(nn.Module):
 class DeformStage(nn.Module):
     def __init__(self, feat_dim, hidden_dim=128, n_blocks=2):
         super().__init__()
-        self.blocks = nn.ModuleList([
-            GCNBlock(feat_dim if i == 0 else hidden_dim, hidden_dim)
-            for i in range(n_blocks)
-        ])
+        self.blocks = nn.ModuleList(
+            [
+                GCNBlock(feat_dim if i == 0 else hidden_dim, hidden_dim)
+                for i in range(n_blocks)
+            ]
+        )
         self.disp_head = nn.Sequential(
             nn.Linear(hidden_dim, 128), nn.ReLU(), nn.Linear(128, 3)
         )
@@ -302,6 +341,7 @@ class DeformStage(nn.Module):
         for blk in self.blocks:
             h = blk(h, adj)
         return verts + self.disp_head(h), h
+
 
 # %% [markdown]
 # ## OmniObject3D model
@@ -320,6 +360,7 @@ class DeformStage(nn.Module):
 # Stage 2  input: [img_feat(2048) + prev_h(hidden) + xyz(3)] → project → hidden
 # ```
 
+
 # %%
 class OmniMesh3D(nn.Module):
     """
@@ -335,21 +376,26 @@ class OmniMesh3D(nn.Module):
 
     def __init__(self, encoder, hidden_dim=512, n_stages=3, n_gcn_blocks=5):
         super().__init__()
-        self.n_stages   = n_stages
+        self.n_stages = n_stages
         self.hidden_dim = hidden_dim
-        self.encoder    = encoder
+        self.encoder = encoder
         total_img = sum(encoder.feat_dims)  # 2048
 
-        self.projectors    = nn.ModuleList()
+        self.projectors = nn.ModuleList()
         self.deform_stages = nn.ModuleList()
         for i in range(n_stages):
             in_dim = (total_img + 3) if i == 0 else (total_img + hidden_dim + 3)
-            self.projectors.append(nn.Sequential(
-                nn.Linear(in_dim, hidden_dim), nn.LayerNorm(hidden_dim), nn.ReLU(),
-                nn.Linear(hidden_dim, hidden_dim), nn.LayerNorm(hidden_dim), nn.ReLU(),
-            ))
-            self.deform_stages.append(
-                DeformStage(hidden_dim, hidden_dim, n_gcn_blocks))
+            self.projectors.append(
+                nn.Sequential(
+                    nn.Linear(in_dim, hidden_dim),
+                    nn.LayerNorm(hidden_dim),
+                    nn.ReLU(),
+                    nn.Linear(hidden_dim, hidden_dim),
+                    nn.LayerNorm(hidden_dim),
+                    nn.ReLU(),
+                )
+            )
+            self.deform_stages.append(DeformStage(hidden_dim, hidden_dim, n_gcn_blocks))
 
         self._build_templates(n_stages)
 
@@ -389,16 +435,18 @@ class OmniMesh3D(nn.Module):
             verts = verts_tmpl.to(device).unsqueeze(0).expand(B, -1, -1).clone()
             V = verts.shape[1]
 
-            coords   = project_vertices(verts, rot, trans, focal)  # [B, V, 2]
-            img_feat = sample_features(feat_maps, coords)           # [B, V, 2048]
+            coords = project_vertices(verts, rot, trans, focal)  # [B, V, 2]
+            img_feat = sample_features(feat_maps, coords)  # [B, V, 2048]
 
             if prev_h is None:
                 combined = torch.cat([img_feat, verts], dim=-1)
             else:
                 if prev_h.shape[1] != V:
                     prev_h = F.interpolate(
-                        prev_h.permute(0, 2, 1), size=V,
-                        mode="linear", align_corners=False,
+                        prev_h.permute(0, 2, 1),
+                        size=V,
+                        mode="linear",
+                        align_corners=False,
                     ).permute(0, 2, 1)
                 combined = torch.cat([img_feat, prev_h, verts], dim=-1)
 
@@ -413,8 +461,9 @@ class OmniMesh3D(nn.Module):
         return {"vertices": all_verts, "faces": all_faces, "laplacians": all_laps}
 
 
-model = OmniMesh3D(encoder=encoder, hidden_dim=512, n_stages=3,
-                   n_gcn_blocks=5).to(DEVICE)
+model = OmniMesh3D(encoder=encoder, hidden_dim=512, n_stages=3, n_gcn_blocks=5).to(
+    DEVICE
+)
 
 total_p = sum(p.numel() for p in model.parameters())
 train_p = sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -427,9 +476,10 @@ print(f"Frozen (encoder): {total_p - train_p:>12,}")
 
 # %%
 B = 2
-img_test   = torch.randn(B, 3, 224, 224, device=DEVICE)
-rot_test   = torch.eye(3, device=DEVICE).unsqueeze(0).expand(B, -1, -1).clone()
-trans_test = torch.zeros(B, 3, device=DEVICE); trans_test[:, 2] = 2.0
+img_test = torch.randn(B, 3, 224, 224, device=DEVICE)
+rot_test = torch.eye(3, device=DEVICE).unsqueeze(0).expand(B, -1, -1).clone()
+trans_test = torch.zeros(B, 3, device=DEVICE)
+trans_test[:, 2] = 2.0
 focal_test = torch.ones(B, device=DEVICE) * 0.85
 
 model.eval()
@@ -447,13 +497,14 @@ for i, v in enumerate(out["vertices"]):
 # Carried over from `pix2mesh_dinov2.py` unchanged — GCN-based binary
 # classifier (real GT point cloud vs predicted mesh vertices).
 
+
 # %%
 class MeshDiscriminator(nn.Module):
     def __init__(self, hidden_dim=256):
         super().__init__()
-        self.gc1  = GraphConv(3, hidden_dim)
-        self.gc2  = GraphConv(hidden_dim, hidden_dim)
-        self.gc3  = GraphConv(hidden_dim, hidden_dim)
+        self.gc1 = GraphConv(3, hidden_dim)
+        self.gc2 = GraphConv(hidden_dim, hidden_dim)
+        self.gc3 = GraphConv(hidden_dim, hidden_dim)
         self.pool = nn.AdaptiveAvgPool1d(1)
         self.head = nn.Sequential(
             nn.Linear(hidden_dim, 128), nn.ReLU(), nn.Linear(128, 1)
@@ -479,10 +530,11 @@ print(f"Discriminator params: {sum(p.numel() for p in discriminator.parameters()
 # more for OmniObject3D because the GT scan meshes have clean, consistent
 # normals — we want the predicted mesh to match that quality.
 
+
 # %%
 def chamfer_distance(pred, gt):
     """Bidirectional Chamfer distance.  pred, gt: [B, N, 3]"""
-    d = ((pred.unsqueeze(2) - gt.unsqueeze(1))**2).sum(-1)
+    d = ((pred.unsqueeze(2) - gt.unsqueeze(1)) ** 2).sum(-1)
     return d.min(2).values.mean() + d.min(1).values.mean()
 
 
@@ -491,16 +543,18 @@ def edge_loss(vertices, faces):
     v0 = vertices[:, faces[:, 0]]
     v1 = vertices[:, faces[:, 1]]
     v2 = vertices[:, faces[:, 2]]
-    return torch.stack([
-        (v0 - v1).norm(dim=-1),
-        (v1 - v2).norm(dim=-1),
-        (v2 - v0).norm(dim=-1),
-    ]).mean()
+    return torch.stack(
+        [
+            (v0 - v1).norm(dim=-1),
+            (v1 - v2).norm(dim=-1),
+            (v2 - v0).norm(dim=-1),
+        ]
+    ).mean()
 
 
 def laplacian_loss(vertices, lap):
     """Penalise non-smooth vertex positions via graph Laplacian."""
-    return (torch.einsum("vw,bwc->bvc", lap, vertices)**2).mean()
+    return (torch.einsum("vw,bwc->bvc", lap, vertices) ** 2).mean()
 
 
 def face_normals(vertices, faces):
@@ -522,14 +576,14 @@ def normal_consistency_loss(vertices, faces):
     Penalise adjacent faces whose normals point in opposite directions.
     Builds a face-adjacency list once per call (cheap at these mesh sizes).
     """
-    normals = face_normals(vertices, faces)   # [B, F, 3]
+    normals = face_normals(vertices, faces)  # [B, F, 3]
     F_count = faces.shape[0]
 
     # Build edge → face mapping
     edge_to_faces = {}
     for fi, tri in enumerate(faces.tolist()):
         for i in range(3):
-            e = tuple(sorted((tri[i], tri[(i+1) % 3])))
+            e = tuple(sorted((tri[i], tri[(i + 1) % 3])))
             edge_to_faces.setdefault(e, []).append(fi)
 
     adj_pairs = [pair for pair in edge_to_faces.values() if len(pair) == 2]
@@ -537,43 +591,45 @@ def normal_consistency_loss(vertices, faces):
         return torch.tensor(0.0, device=vertices.device)
 
     pairs = torch.tensor(adj_pairs, dtype=torch.long, device=vertices.device)
-    n0 = normals[:, pairs[:, 0]]   # [B, E, 3]
-    n1 = normals[:, pairs[:, 1]]   # [B, E, 3]
+    n0 = normals[:, pairs[:, 0]]  # [B, E, 3]
+    n1 = normals[:, pairs[:, 1]]  # [B, E, 3]
     # Loss = 1 - cos(θ): 0 when parallel, 2 when anti-parallel
     return (1.0 - (n0 * n1).sum(-1)).mean()
 
 
-def compute_loss(pred_verts, gt_pts, faces, lap,
-                 w_cd=1.0, w_edge=0.1, w_lap=0.5, w_norm=0.1):
-    cd   = chamfer_distance(pred_verts, gt_pts)
-    el   = edge_loss(pred_verts, faces)
-    lpl  = laplacian_loss(pred_verts, lap)
-    nc   = normal_consistency_loss(pred_verts, faces)
-    total = w_cd*cd + w_edge*el + w_lap*lpl + w_norm*nc
+def compute_loss(
+    pred_verts, gt_pts, faces, lap, w_cd=1.0, w_edge=0.1, w_lap=0.5, w_norm=0.1
+):
+    cd = chamfer_distance(pred_verts, gt_pts)
+    el = edge_loss(pred_verts, faces)
+    lpl = laplacian_loss(pred_verts, lap)
+    nc = normal_consistency_loss(pred_verts, faces)
+    total = w_cd * cd + w_edge * el + w_lap * lpl + w_norm * nc
     return total, {
-        "chamfer": cd.item(), "edge": el.item(),
-        "laplacian": lpl.item(), "normal": nc.item(),
+        "chamfer": cd.item(),
+        "edge": el.item(),
+        "laplacian": lpl.item(),
+        "normal": nc.item(),
     }
 
 
 def compute_adversarial_loss(pred_logits, real_logits):
     fake = F.binary_cross_entropy_with_logits(
-        pred_logits, torch.zeros_like(pred_logits))
-    real = F.binary_cross_entropy_with_logits(
-        real_logits, torch.ones_like(real_logits))
+        pred_logits, torch.zeros_like(pred_logits)
+    )
+    real = F.binary_cross_entropy_with_logits(real_logits, torch.ones_like(real_logits))
     return (fake + real) / 2.0
 
 
 def fool_discriminator(pred_logits):
-    return F.binary_cross_entropy_with_logits(
-        pred_logits, torch.ones_like(pred_logits))
+    return F.binary_cross_entropy_with_logits(pred_logits, torch.ones_like(pred_logits))
 
 
 # Quick loss check
-pred_v   = out["vertices"][2]
-gt_pts   = torch.randn(2, 4096, 3, device=DEVICE) * 0.4
+pred_v = out["vertices"][2]
+gt_pts = torch.randn(2, 4096, 3, device=DEVICE) * 0.4
 faces_s3 = out["faces"][2].to(DEVICE)
-lap_s3   = out["laplacians"][2].to(DEVICE)
+lap_s3 = out["laplacians"][2].to(DEVICE)
 loss_val, breakdown = compute_loss(pred_v, gt_pts, faces_s3, lap_s3)
 print(f"\nLoss sanity check:")
 print(f"  Total : {loss_val.item():.4f}")
@@ -591,39 +647,47 @@ for k, v in breakdown.items():
 # | FPN lateral + output convs | 1e-4 | Adapts routing to OmniObject3D data |
 # | GCN projectors + deform stages | 3e-4 | Main learnable path |
 
+
 # %%
 def make_optimizer(model, lr_fpn=1e-4, lr_gcn=3e-4, weight_decay=1e-4):
-    fpn_params = (
-        list(model.encoder.lateral.parameters()) +
-        list(model.encoder.output_convs.parameters())
+    fpn_params = list(model.encoder.lateral.parameters()) + list(
+        model.encoder.output_convs.parameters()
     )
     gcn_params = [p for n, p in model.named_parameters() if "encoder" not in n]
-    return torch.optim.AdamW([
-        {"params": fpn_params, "lr": lr_fpn},
-        {"params": gcn_params, "lr": lr_gcn},
-    ], weight_decay=weight_decay)
+    return torch.optim.AdamW(
+        [
+            {"params": fpn_params, "lr": lr_fpn},
+            {"params": gcn_params, "lr": lr_gcn},
+        ],
+        weight_decay=weight_decay,
+    )
+
 
 # %% [markdown]
 # ## Checkpoint utilities
 
+
 # %%
 def save_ckpt(model, optimizer, disc, optimizer_disc, epoch, path, val_cd=None):
-    torch.save({
-        "epoch":          epoch,
-        "model":          model.state_dict(),
-        "optimizer":      optimizer.state_dict(),
-        "discriminator":  disc.state_dict(),
-        "optimizer_disc": optimizer_disc.state_dict(),
-        "val_cd":         val_cd,
-    }, path)
+    torch.save(
+        {
+            "epoch": epoch,
+            "model": model.state_dict(),
+            "optimizer": optimizer.state_dict(),
+            "discriminator": disc.state_dict(),
+            "optimizer_disc": optimizer_disc.state_dict(),
+            "val_cd": val_cd,
+        },
+        path,
+    )
     print(f"Saved → {path}")
 
 
-def load_ckpt(model, path, optimizer=None, disc=None,
-              optimizer_disc=None, device=None):
+def load_ckpt(model, path, optimizer=None, disc=None, optimizer_disc=None, device=None):
     ckpt = torch.load(path, map_location=device or "cpu")
     model.load_state_dict(ckpt["model"])
-    if optimizer:      optimizer.load_state_dict(ckpt["optimizer"])
+    if optimizer:
+        optimizer.load_state_dict(ckpt["optimizer"])
     if disc and "discriminator" in ckpt:
         disc.load_state_dict(ckpt["discriminator"])
     if optimizer_disc and "optimizer_disc" in ckpt:
@@ -631,38 +695,42 @@ def load_ckpt(model, path, optimizer=None, disc=None,
     print(f"Loaded epoch={ckpt['epoch']}  val_cd={ckpt.get('val_cd')}")
     return ckpt
 
+
 # %% [markdown]
 # ## Smoke test — end-to-end with real dataset batch
 
+import os
 # %%
-import sys, os
+import sys
+
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from omniobject3d_dinov2 import OmniObject3DDataset, collate_omni
 from torch.utils.data import DataLoader
 
 OMNI_ROOT = "data/OmniObject3D"
 
-smoke_ds     = OmniObject3DDataset(OMNI_ROOT, split="train",
-                                   categories=["chair", "sofa"])
-smoke_loader = DataLoader(smoke_ds, batch_size=2, shuffle=True,
-                          num_workers=0, collate_fn=collate_omni)
+smoke_ds = OmniObject3DDataset(OMNI_ROOT, split="train", categories=["chair", "sofa"])
+smoke_loader = DataLoader(
+    smoke_ds, batch_size=2, shuffle=True, num_workers=0, collate_fn=collate_omni
+)
 
-smoke_model = OmniMesh3D(encoder=encoder, hidden_dim=512,
-                         n_stages=3, n_gcn_blocks=5).to(DEVICE)
-smoke_disc  = MeshDiscriminator(hidden_dim=256).to(DEVICE)
+smoke_model = OmniMesh3D(
+    encoder=encoder, hidden_dim=512, n_stages=3, n_gcn_blocks=5
+).to(DEVICE)
+smoke_disc = MeshDiscriminator(hidden_dim=256).to(DEVICE)
 
-smoke_opt      = make_optimizer(smoke_model)
-smoke_opt_disc = torch.optim.AdamW(smoke_disc.parameters(),
-                                   lr=3e-4, weight_decay=1e-4)
+smoke_opt = make_optimizer(smoke_model)
+smoke_opt_disc = torch.optim.AdamW(smoke_disc.parameters(), lr=3e-4, weight_decay=1e-4)
 
 STAGE_WEIGHTS = [0.15, 0.25, 0.60]
 
-smoke_model.train(); smoke_disc.train()
+smoke_model.train()
+smoke_disc.train()
 batch = next(iter(smoke_loader))
 
-img   = batch["image"].to(DEVICE)
-gt    = batch["gt_points"].to(DEVICE)
-rot   = batch["rot"].to(DEVICE)
+img = batch["image"].to(DEVICE)
+gt = batch["gt_points"].to(DEVICE)
+rot = batch["rot"].to(DEVICE)
 trans = batch["trans"].to(DEVICE)
 focal = batch["focal"].to(DEVICE)
 
@@ -670,15 +738,16 @@ focal = batch["focal"].to(DEVICE)
 smoke_opt.zero_grad()
 out = smoke_model(img, rot, trans, focal)
 loss_g = torch.tensor(0.0, device=DEVICE)
-for verts, faces, lap, w in zip(out["vertices"], out["faces"],
-                                 out["laplacians"], STAGE_WEIGHTS):
+for verts, faces, lap, w in zip(
+    out["vertices"], out["faces"], out["laplacians"], STAGE_WEIGHTS
+):
     l, breakdown = compute_loss(verts, gt, faces.to(DEVICE), lap.to(DEVICE))
     loss_g = loss_g + w * l
 
-adj_final  = smoke_model.adj_2.to(DEVICE)
+adj_final = smoke_model.adj_2.to(DEVICE)
 fake_logits = smoke_disc(out["vertices"][-1], adj_final)
-loss_adv    = fool_discriminator(fake_logits)
-loss_g      = loss_g + 0.1 * loss_adv
+loss_adv = fool_discriminator(fake_logits)
+loss_g = loss_g + 0.1 * loss_adv
 loss_g.backward()
 torch.nn.utils.clip_grad_norm_(smoke_model.parameters(), 1.0)
 smoke_opt.step()
@@ -687,7 +756,7 @@ smoke_opt.step()
 smoke_opt_disc.zero_grad()
 with torch.no_grad():
     fake_logits = smoke_disc(out["vertices"][-1].detach(), adj_final)
-real_logits = smoke_disc(gt[:, :out["vertices"][-1].shape[1]], adj_final)
+real_logits = smoke_disc(gt[:, : out["vertices"][-1].shape[1]], adj_final)
 loss_d = compute_adversarial_loss(fake_logits, real_logits)
 loss_d.backward()
 torch.nn.utils.clip_grad_norm_(smoke_disc.parameters(), 1.0)

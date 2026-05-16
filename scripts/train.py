@@ -1,27 +1,39 @@
-import os
+import argparse
+import datetime
 import json
+import os
 import random
 import time
-import torch
-import torch.nn as nn
-import torch.distributed as dist
-import torch.nn.functional as F
-import numpy as np
-import datetime
 from pathlib import Path
-from PIL import Image
-from tqdm.auto import tqdm
-from torch.utils.data import Dataset, DataLoader
-from torch.utils.data.distributed import DistributedSampler
-from torch.nn.parallel import DistributedDataParallel as DDP
-import argparse
+
 import matplotlib
+import numpy as np
+import torch
+import torch.distributed as dist
+import torch.nn as nn
+import torch.nn.functional as F
+from PIL import Image
+from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.utils.data import DataLoader, Dataset
+from torch.utils.data.distributed import DistributedSampler
+from tqdm.auto import tqdm
+
 matplotlib.use("MacOSX")
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 
 # Constants
-PIX3D_CATS = ["bed", "bookcase", "chair", "desk", "misc", "sofa", "table", "tool", "wardrobe"]
+PIX3D_CATS = [
+    "bed",
+    "bookcase",
+    "chair",
+    "desk",
+    "misc",
+    "sofa",
+    "table",
+    "tool",
+    "wardrobe",
+]
 DINO_MEAN = [0.485, 0.456, 0.406]
 DINO_STD = [0.229, 0.224, 0.225]
 STAGE_WEIGHTS = [0.15, 0.25, 0.3, 0.3]
@@ -49,9 +61,7 @@ def setup_distributed():
     print(f"Using backend: {backend}")
 
     dist.init_process_group(
-        backend=backend,
-        init_method="env://",
-        timeout=datetime.timedelta(seconds=30)
+        backend=backend, init_method="env://", timeout=datetime.timedelta(seconds=30)
     )
 
 
@@ -61,20 +71,36 @@ def cleanup_distributed():
 
 # Mesh utilities
 def get_unit_cube():
-    v = torch.tensor([
-        [-0.5, -0.5, -0.5], [0.5, -0.5, -0.5],
-        [0.5, 0.5, -0.5], [-0.5, 0.5, -0.5],
-        [-0.5, -0.5, 0.5], [0.5, -0.5, 0.5],
-        [0.5, 0.5, 0.5], [-0.5, 0.5, 0.5],
-    ], dtype=torch.float32)
-    f = torch.tensor([
-        [0, 1, 2], [0, 2, 3],
-        [4, 6, 5], [4, 7, 6],
-        [0, 4, 5], [0, 5, 1],
-        [2, 6, 7], [2, 7, 3],
-        [0, 7, 4], [0, 3, 7],
-        [1, 5, 6], [1, 6, 2],
-    ], dtype=torch.long)
+    v = torch.tensor(
+        [
+            [-0.5, -0.5, -0.5],
+            [0.5, -0.5, -0.5],
+            [0.5, 0.5, -0.5],
+            [-0.5, 0.5, -0.5],
+            [-0.5, -0.5, 0.5],
+            [0.5, -0.5, 0.5],
+            [0.5, 0.5, 0.5],
+            [-0.5, 0.5, 0.5],
+        ],
+        dtype=torch.float32,
+    )
+    f = torch.tensor(
+        [
+            [0, 1, 2],
+            [0, 2, 3],
+            [4, 6, 5],
+            [4, 7, 6],
+            [0, 4, 5],
+            [0, 5, 1],
+            [2, 6, 7],
+            [2, 7, 3],
+            [0, 7, 4],
+            [0, 3, 7],
+            [1, 5, 6],
+            [1, 6, 2],
+        ],
+        dtype=torch.long,
+    )
     return v, f
 
 
@@ -163,16 +189,26 @@ def verify_projection(loader, device, n_batches=3, sat_threshold=0.5):
 
         flag = "  <-- SATURATED" if sat_frac > sat_threshold else ""
         print(f"[batch {bi}] B={B}")
-        print(f"  cube proj raw: x=[{x_min:+.3f}, {x_max:+.3f}]  y=[{y_min:+.3f}, {y_max:+.3f}]")
+        print(
+            f"  cube proj raw: x=[{x_min:+.3f}, {x_max:+.3f}]  y=[{y_min:+.3f}, {y_max:+.3f}]"
+        )
         print(f"  saturated vertices (|x| or |y| >= 1): {sat_frac*100:.1f}%{flag}")
-        print(f"  gt point range : x=[{gt_min[0]:+.3f},{gt_max[0]:+.3f}] y=[{gt_min[1]:+.3f},{gt_max[1]:+.3f}] z=[{gt_min[2]:+.3f},{gt_max[2]:+.3f}]")
-        print(f"  trans range    : x=[{t_min[0]:+.3f},{t_max[0]:+.3f}] y=[{t_min[1]:+.3f},{t_max[1]:+.3f}] z=[{t_min[2]:+.3f},{t_max[2]:+.3f}]")
-        print(f"  focal range    : [{focal.min().item():.3f}, {focal.max().item():.3f}]")
+        print(
+            f"  gt point range : x=[{gt_min[0]:+.3f},{gt_max[0]:+.3f}] y=[{gt_min[1]:+.3f},{gt_max[1]:+.3f}] z=[{gt_min[2]:+.3f},{gt_max[2]:+.3f}]"
+        )
+        print(
+            f"  trans range    : x=[{t_min[0]:+.3f},{t_max[0]:+.3f}] y=[{t_min[1]:+.3f},{t_max[1]:+.3f}] z=[{t_min[2]:+.3f},{t_max[2]:+.3f}]"
+        )
+        print(
+            f"  focal range    : [{focal.min().item():.3f}, {focal.max().item():.3f}]"
+        )
         if sat_frac > sat_threshold:
             any_bad = True
 
     if any_bad:
-        print("\n[WARN] High saturation detected. The unit cube template projects outside")
+        print(
+            "\n[WARN] High saturation detected. The unit cube template projects outside"
+        )
         print("       the image. Likely cause: GT mesh is normalised to unit-norm but")
         print("       trans/focal come from raw Pix3D coords. Fix: either skip")
         print("       normalise_mesh and predict in camera space, or scale trans by")
@@ -186,7 +222,9 @@ def sample_features(feature_maps, coords):
     grid = coords.unsqueeze(1)
     sampled = []
     for fm in feature_maps:
-        s = F.grid_sample(fm, grid, align_corners=True, mode="bilinear", padding_mode="border")
+        s = F.grid_sample(
+            fm, grid, align_corners=True, mode="bilinear", padding_mode="border"
+        )
         sampled.append(s.squeeze(2).permute(0, 2, 1))
     return torch.cat(sampled, dim=-1)
 
@@ -200,42 +238,51 @@ _TAP_BLOCKS = [2, 5, 8, 11]
 class DINOv2FPNEncoder(nn.Module):
     def __init__(self, freeze_backbone=True):
         super().__init__()
-        self.dino = torch.hub.load("facebookresearch/dinov2", _DINOV2_MODEL, pretrained=True)
+        self.dino = torch.hub.load(
+            "facebookresearch/dinov2", _DINOV2_MODEL, pretrained=True
+        )
         embed_dim = self.dino.embed_dim
 
         self._feats = {}
         self._hooks = []
         for blk_idx in _TAP_BLOCKS:
-            hook = self.dino.blocks[blk_idx].register_forward_hook(self._make_hook(blk_idx))
+            hook = self.dino.blocks[blk_idx].register_forward_hook(
+                self._make_hook(blk_idx)
+            )
             self._hooks.append(hook)
 
         if freeze_backbone:
             for p in self.dino.parameters():
                 p.requires_grad = False
 
-        self.lateral = nn.ModuleList([
-            nn.Sequential(
-                nn.Conv2d(embed_dim, _FPN_CHANNELS, 1, bias=False),
-                nn.BatchNorm2d(_FPN_CHANNELS),
-                nn.ReLU(inplace=True),
-            )
-            for _ in _TAP_BLOCKS
-        ])
+        self.lateral = nn.ModuleList(
+            [
+                nn.Sequential(
+                    nn.Conv2d(embed_dim, _FPN_CHANNELS, 1, bias=False),
+                    nn.BatchNorm2d(_FPN_CHANNELS),
+                    nn.ReLU(inplace=True),
+                )
+                for _ in _TAP_BLOCKS
+            ]
+        )
 
-        self.output_convs = nn.ModuleList([
-            nn.Sequential(
-                nn.Conv2d(_FPN_CHANNELS, _FPN_CHANNELS, 3, padding=1, bias=False),
-                nn.BatchNorm2d(_FPN_CHANNELS),
-                nn.ReLU(inplace=True),
-            )
-            for _ in _TAP_BLOCKS
-        ])
+        self.output_convs = nn.ModuleList(
+            [
+                nn.Sequential(
+                    nn.Conv2d(_FPN_CHANNELS, _FPN_CHANNELS, 3, padding=1, bias=False),
+                    nn.BatchNorm2d(_FPN_CHANNELS),
+                    nn.ReLU(inplace=True),
+                )
+                for _ in _TAP_BLOCKS
+            ]
+        )
 
         self.feat_dims = [_FPN_CHANNELS] * 4
 
     def _make_hook(self, blk_idx):
         def hook(module, input, output):
             self._feats[blk_idx] = output[:, 1:, :]
+
         return hook
 
     def _patch_tokens_to_spatial(self, tokens, h_patches, w_patches):
@@ -260,13 +307,20 @@ class DINOv2FPNEncoder(nn.Module):
         fpn = [None] * 4
         fpn[3] = laterals[3]
         for i in range(2, -1, -1):
-            upsampled = F.interpolate(fpn[i + 1], size=laterals[i].shape[-2:], mode="nearest")
+            upsampled = F.interpolate(
+                fpn[i + 1], size=laterals[i].shape[-2:], mode="nearest"
+            )
             fpn[i] = laterals[i] + upsampled
 
         target_sizes = [128, 64, 32, 16]
         out = []
         for i in range(4):
-            fm = F.interpolate(fpn[i], size=(target_sizes[i], target_sizes[i]), mode="bilinear", align_corners=False)
+            fm = F.interpolate(
+                fpn[i],
+                size=(target_sizes[i], target_sizes[i]),
+                mode="bilinear",
+                align_corners=False,
+            )
             out.append(self.output_convs[i](fm))
 
         return out
@@ -292,7 +346,11 @@ class GCNBlock(nn.Module):
         super().__init__()
         self.gc1 = GraphConv(in_dim, hidden_dim)
         self.gc2 = GraphConv(hidden_dim, hidden_dim)
-        self.skip = nn.Linear(in_dim, hidden_dim, bias=False) if in_dim != hidden_dim else nn.Identity()
+        self.skip = (
+            nn.Linear(in_dim, hidden_dim, bias=False)
+            if in_dim != hidden_dim
+            else nn.Identity()
+        )
 
     def forward(self, x, adj):
         return self.gc2(self.gc1(x, adj), adj) + self.skip(x)
@@ -301,10 +359,12 @@ class GCNBlock(nn.Module):
 class DeformStage(nn.Module):
     def __init__(self, feat_dim, hidden_dim=128, n_blocks=2):
         super().__init__()
-        self.blocks = nn.ModuleList([
-            GCNBlock(feat_dim if i == 0 else hidden_dim, hidden_dim)
-            for i in range(n_blocks)
-        ])
+        self.blocks = nn.ModuleList(
+            [
+                GCNBlock(feat_dim if i == 0 else hidden_dim, hidden_dim)
+                for i in range(n_blocks)
+            ]
+        )
         self.disp_head = nn.Sequential(
             nn.Linear(hidden_dim, 64), nn.ReLU(), nn.Linear(64, 3)
         )
@@ -329,10 +389,16 @@ class Furniture3D(nn.Module):
         self.deform_stages = nn.ModuleList()
         for i in range(n_stages):
             in_dim = (total_img + 3) if i == 0 else (total_img + hidden_dim + 3)
-            self.projectors.append(nn.Sequential(
-                nn.Linear(in_dim, hidden_dim), nn.LayerNorm(hidden_dim), nn.ReLU(),
-                nn.Linear(hidden_dim, hidden_dim), nn.LayerNorm(hidden_dim), nn.ReLU(),
-            ))
+            self.projectors.append(
+                nn.Sequential(
+                    nn.Linear(in_dim, hidden_dim),
+                    nn.LayerNorm(hidden_dim),
+                    nn.ReLU(),
+                    nn.Linear(hidden_dim, hidden_dim),
+                    nn.LayerNorm(hidden_dim),
+                    nn.ReLU(),
+                )
+            )
             self.deform_stages.append(DeformStage(hidden_dim, hidden_dim, n_gcn_blocks))
 
         self._build_templates(n_stages)
@@ -370,7 +436,10 @@ class Furniture3D(nn.Module):
             else:
                 if prev_h.shape[1] != V:
                     prev_h = F.interpolate(
-                        prev_h.permute(0, 2, 1), size=V, mode="linear", align_corners=False
+                        prev_h.permute(0, 2, 1),
+                        size=V,
+                        mode="linear",
+                        align_corners=False,
                     ).permute(0, 2, 1)
                 combined = torch.cat([img_feat, prev_h, verts], dim=-1)
 
@@ -383,7 +452,12 @@ class Furniture3D(nn.Module):
             all_tmpls.append(verts_tmpl.to(device))
             prev_h = hidden
 
-        return {"vertices": all_verts, "faces": all_faces, "laplacians": all_laps, "templates": all_tmpls}
+        return {
+            "vertices": all_verts,
+            "faces": all_faces,
+            "laplacians": all_laps,
+            "templates": all_tmpls,
+        }
 
 
 # Dataset
@@ -400,7 +474,9 @@ def load_obj(path):
                 idx = [int(x.split("/")[0]) - 1 for x in p[1:]]
                 for i in range(1, len(idx) - 1):
                     faces.append([idx[0], idx[i], idx[i + 1]])
-    return torch.tensor(verts, dtype=torch.float32), torch.tensor(faces, dtype=torch.long)
+    return torch.tensor(verts, dtype=torch.float32), torch.tensor(
+        faces, dtype=torch.long
+    )
 
 
 def normalise_mesh(v):
@@ -415,9 +491,11 @@ def sample_surface(verts, faces, n=2048):
     fi = torch.from_numpy(np.random.choice(len(faces), n, p=prob))
     r1 = torch.rand(n).sqrt()
     u, v, w = 1 - r1, r1 * (1 - torch.rand(n)), r1 * torch.rand(n)
-    return (u[:, None] * verts[faces[fi, 0]]
-            + v[:, None] * verts[faces[fi, 1]]
-            + w[:, None] * verts[faces[fi, 2]])
+    return (
+        u[:, None] * verts[faces[fi, 0]]
+        + v[:, None] * verts[faces[fi, 1]]
+        + w[:, None] * verts[faces[fi, 2]]
+    )
 
 
 class Pix3DDataset(Dataset):
@@ -427,24 +505,34 @@ class Pix3DDataset(Dataset):
         with open(os.path.join(root, "pix3d.json")) as f:
             anns = json.load(f)
         cats = set(categories or PIX3D_CATS)
-        anns = [a for a in anns if a["category"] in cats
-                and not a.get("truncated") and not a.get("occluded")
-                and a.get("trans_mat") and a.get("focal_length") and a.get("img_size")]
+        anns = [
+            a
+            for a in anns
+            if a["category"] in cats
+            and not a.get("truncated")
+            and not a.get("occluded")
+            and a.get("trans_mat")
+            and a.get("focal_length")
+            and a.get("img_size")
+        ]
         random.seed(42)
         random.shuffle(anns)
         n = len(anns)
         splits = {
-            "train": anns[:int(0.8 * n)],
-            "val": anns[int(0.8 * n):int(0.9 * n)],
-            "test": anns[int(0.9 * n):]
+            "train": anns[: int(0.8 * n)],
+            "val": anns[int(0.8 * n) : int(0.9 * n)],
+            "test": anns[int(0.9 * n) :],
         }
         self.samples = splits[split]
         from torchvision import transforms
-        self.tfm = transforms.Compose([
-            transforms.Resize((img_size, img_size)),
-            transforms.ToTensor(),
-            transforms.Normalize(DINO_MEAN, DINO_STD),
-        ])
+
+        self.tfm = transforms.Compose(
+            [
+                transforms.Resize((img_size, img_size)),
+                transforms.ToTensor(),
+                transforms.Normalize(DINO_MEAN, DINO_STD),
+            ]
+        )
 
     def __len__(self):
         return len(self.samples)
@@ -460,10 +548,16 @@ class Pix3DDataset(Dataset):
         # Clamp depth so the projection never explodes near z=0
         trans[2] = trans[2].clamp(min=1.0)
         w, h = a["img_size"]
-        focal = torch.tensor(a["focal_length"] / (max(w, h) / 2.), dtype=torch.float32)
+        focal = torch.tensor(a["focal_length"] / (max(w, h) / 2.0), dtype=torch.float32)
         # Clamp focal to a sane NDC range (extreme telephoto/fisheye → border samples)
         focal = focal.clamp(0.3, 6.0)
-        return {"image": image, "gt_points": gt_pts, "rot": rot, "trans": trans, "focal": focal}
+        return {
+            "image": image,
+            "gt_points": gt_pts,
+            "rot": rot,
+            "trans": trans,
+            "focal": focal,
+        }
 
 
 # Loss functions
@@ -473,10 +567,14 @@ def chamfer_distance(pred, gt):
 
 
 def edge_loss(vertices, faces):
-    v0, v1, v2 = vertices[:, faces[:, 0]], vertices[:, faces[:, 1]], vertices[:, faces[:, 2]]
-    return torch.stack([
-        (v0 - v1).norm(dim=-1), (v1 - v2).norm(dim=-1), (v2 - v0).norm(dim=-1)
-    ]).mean()
+    v0, v1, v2 = (
+        vertices[:, faces[:, 0]],
+        vertices[:, faces[:, 1]],
+        vertices[:, faces[:, 2]],
+    )
+    return torch.stack(
+        [(v0 - v1).norm(dim=-1), (v1 - v2).norm(dim=-1), (v2 - v0).norm(dim=-1)]
+    ).mean()
 
 
 def laplacian_loss(vertices, lap, template_verts=None):
@@ -484,10 +582,12 @@ def laplacian_loss(vertices, lap, template_verts=None):
     if template_verts is not None:
         delta_tmpl = torch.einsum("vw,wc->vc", lap, template_verts).unsqueeze(0)
         return ((delta_pred - delta_tmpl) ** 2).mean()
-    return (delta_pred ** 2).mean()
+    return (delta_pred**2).mean()
 
 
-def compute_loss(pred_verts, gt_pts, faces, lap, template_verts=None, w_cd=1.0, w_edge=0.1, w_lap=0.5):
+def compute_loss(
+    pred_verts, gt_pts, faces, lap, template_verts=None, w_cd=1.0, w_edge=0.1, w_lap=0.5
+):
     cd = chamfer_distance(pred_verts, gt_pts)
     el = edge_loss(pred_verts, faces)
     lpl = laplacian_loss(pred_verts, lap, template_verts)
@@ -503,7 +603,9 @@ def get_stage_weights(n_stages, base_weights=None):
     return weights.tolist()
 
 
-def _render_step(step, epoch, pred_verts_list, faces_list, gt_pts, losses, save_path=None):
+def _render_step(
+    step, epoch, pred_verts_list, faces_list, gt_pts, losses, save_path=None
+):
     n_stages = len(pred_verts_list)
     # columns: loss | gt | stage_1 .. stage_N
     n_cols = 1 + 1 + n_stages
@@ -533,10 +635,14 @@ def _render_step(step, epoch, pred_verts_list, faces_list, gt_pts, losses, save_
         pv = verts[0].detach().cpu().numpy()
         ff = faces.cpu().numpy()
         tris = [pv[f] for f in ff]
-        poly = Poly3DCollection(tris, alpha=0.3, facecolor=colors[i], edgecolor="#555", linewidth=0.1)
+        poly = Poly3DCollection(
+            tris, alpha=0.3, facecolor=colors[i], edgecolor="#555", linewidth=0.1
+        )
         ax.add_collection3d(poly)
         lim = 0.6
-        ax.set_xlim(-lim, lim); ax.set_ylim(-lim, lim); ax.set_zlim(-lim, lim)
+        ax.set_xlim(-lim, lim)
+        ax.set_ylim(-lim, lim)
+        ax.set_zlim(-lim, lim)
         ax.set_title(f"Stage {i + 1}  ({pv.shape[0]}V)", fontsize=9)
         ax.set_axis_off()
 
@@ -548,7 +654,20 @@ def _render_step(step, epoch, pred_verts_list, faces_list, gt_pts, losses, save_
     plt.close(fig)
 
 
-def train(model, train_loader, val_loader, optimizer, scheduler, epochs, device, rank, ckpt_dir="./checkpoints", resume_ckpt=None, vis_every=5, vis_dir=None):
+def train(
+    model,
+    train_loader,
+    val_loader,
+    optimizer,
+    scheduler,
+    epochs,
+    device,
+    rank,
+    ckpt_dir="./checkpoints",
+    resume_ckpt=None,
+    vis_every=5,
+    vis_dir=None,
+):
     os.makedirs(ckpt_dir, exist_ok=True)
     if rank == 0:
         plt.ion()
@@ -583,7 +702,7 @@ def train(model, train_loader, val_loader, optimizer, scheduler, epochs, device,
         model.train()
         epoch_loss = 0.0
 
-        if hasattr(train_loader.sampler, 'set_epoch'):
+        if hasattr(train_loader.sampler, "set_epoch"):
             train_loader.sampler.set_epoch(epoch)
 
         pbar = tqdm(train_loader, disable=(rank != 0), desc=f"Epoch {epoch}/{epochs}")
@@ -598,9 +717,21 @@ def train(model, train_loader, val_loader, optimizer, scheduler, epochs, device,
             if torch.cuda.is_available():
                 with torch.amp.autocast("cuda"):
                     out = model(img, rot, trans, focal)
-                    loss = torch.tensor(0., device=device)
-                    for verts, faces, lap, tmpl, w in zip(out["vertices"], out["faces"], out["laplacians"], out["templates"], stage_weights):
-                        l, _ = compute_loss(verts, gt, faces.to(device), lap.to(device), template_verts=tmpl)
+                    loss = torch.tensor(0.0, device=device)
+                    for verts, faces, lap, tmpl, w in zip(
+                        out["vertices"],
+                        out["faces"],
+                        out["laplacians"],
+                        out["templates"],
+                        stage_weights,
+                    ):
+                        l, _ = compute_loss(
+                            verts,
+                            gt,
+                            faces.to(device),
+                            lap.to(device),
+                            template_verts=tmpl,
+                        )
                         loss = loss + w * l
                 scaler.scale(loss).backward()
                 torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
@@ -608,9 +739,17 @@ def train(model, train_loader, val_loader, optimizer, scheduler, epochs, device,
                 scaler.update()
             else:
                 out = model(img, rot, trans, focal)
-                loss = torch.tensor(0., device=device)
-                for verts, faces, lap, tmpl, w in zip(out["vertices"], out["faces"], out["laplacians"], out["templates"], stage_weights):
-                    l, _ = compute_loss(verts, gt, faces.to(device), lap.to(device), template_verts=tmpl)
+                loss = torch.tensor(0.0, device=device)
+                for verts, faces, lap, tmpl, w in zip(
+                    out["vertices"],
+                    out["faces"],
+                    out["laplacians"],
+                    out["templates"],
+                    stage_weights,
+                ):
+                    l, _ = compute_loss(
+                        verts, gt, faces.to(device), lap.to(device), template_verts=tmpl
+                    )
                     loss = loss + w * l
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
@@ -625,8 +764,18 @@ def train(model, train_loader, val_loader, optimizer, scheduler, epochs, device,
                 if global_step % vis_every == 0:
                     save_path = None
                     if vis_dir:
-                        save_path = os.path.join(vis_dir, f"epoch{epoch:04d}_step{global_step:07d}.png")
-                    _render_step(global_step, epoch, out["vertices"], out["faces"], gt, losses, save_path=save_path)
+                        save_path = os.path.join(
+                            vis_dir, f"epoch{epoch:04d}_step{global_step:07d}.png"
+                        )
+                    _render_step(
+                        global_step,
+                        epoch,
+                        out["vertices"],
+                        out["faces"],
+                        gt,
+                        losses,
+                        save_path=save_path,
+                    )
 
         avg_loss = epoch_loss / len(train_loader)
 
@@ -642,13 +791,16 @@ def train(model, train_loader, val_loader, optimizer, scheduler, epochs, device,
         if rank == 0:
             print(f"Epoch {epoch}/{epochs} | train: {avg_loss:.4f}")
             ckpt_path = os.path.join(ckpt_dir, f"ckpt_epoch_{epoch:04d}.pth")
-            torch.save({
-                "epoch": epoch,
-                "model": model_inner.state_dict(),
-                "optimizer": optimizer.state_dict(),
-                "scheduler": scheduler.state_dict() if scheduler else None,
-                "val_loss": val_loss,
-            }, ckpt_path)
+            torch.save(
+                {
+                    "epoch": epoch,
+                    "model": model_inner.state_dict(),
+                    "optimizer": optimizer.state_dict(),
+                    "scheduler": scheduler.state_dict() if scheduler else None,
+                    "val_loss": val_loss,
+                },
+                ckpt_path,
+            )
             print(f"Checkpoint saved → {ckpt_path}")
 
     if rank == 0:
@@ -667,9 +819,17 @@ def evaluate(model, val_loader, device, stage_weights):
             focal = batch["focal"].to(device)
 
             out = model(img, rot, trans, focal)
-            loss = torch.tensor(0., device=device)
-            for verts, faces, lap, tmpl, w in zip(out["vertices"], out["faces"], out["laplacians"], out["templates"], stage_weights):
-                l, _ = compute_loss(verts, gt, faces.to(device), lap.to(device), template_verts=tmpl)
+            loss = torch.tensor(0.0, device=device)
+            for verts, faces, lap, tmpl, w in zip(
+                out["vertices"],
+                out["faces"],
+                out["laplacians"],
+                out["templates"],
+                stage_weights,
+            ):
+                l, _ = compute_loss(
+                    verts, gt, faces.to(device), lap.to(device), template_verts=tmpl
+                )
                 loss = loss + w * l
             total_loss += loss.item()
 
@@ -686,21 +846,59 @@ def save_quantized(model, ckpt_dir):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Distributed training for Pixel2Mesh with DINOv2")
-    parser.add_argument("--pix3d-root", type=str, default="data/pix3d", help="Path to Pix3D dataset")
+    parser = argparse.ArgumentParser(
+        description="Distributed training for Pixel2Mesh with DINOv2"
+    )
+    parser.add_argument(
+        "--pix3d-root", type=str, default="data/pix3d", help="Path to Pix3D dataset"
+    )
     parser.add_argument("--batch-size", type=int, default=64, help="Batch size per GPU")
     parser.add_argument("--epochs", type=int, default=100, help="Number of epochs")
-    parser.add_argument("--lr-fpn", type=float, default=1e-4, help="Learning rate for FPN")
-    parser.add_argument("--lr-gcn", type=float, default=4e-5, help="Learning rate for GCN")
+    parser.add_argument(
+        "--lr-fpn", type=float, default=1e-4, help="Learning rate for FPN"
+    )
+    parser.add_argument(
+        "--lr-gcn", type=float, default=4e-5, help="Learning rate for GCN"
+    )
     parser.add_argument("--hidden-dim", type=int, default=256, help="Hidden dimension")
-    parser.add_argument("--n-stages", type=int, default=4, help="Number of deformation stages")
-    parser.add_argument("--n-gcn-blocks", type=int, default=3, help="GCN blocks per stage")
-    parser.add_argument("--num-workers", type=int, default=min(8, os.cpu_count() or 1), help="Number of data loading workers")
-    parser.add_argument("--ckpt-dir", type=str, default="./checkpoints", help="Directory to save checkpoints")
-    parser.add_argument("--resume-ckpt", type=str, default=None, help="Path to checkpoint to resume from")
-    parser.add_argument("--vis-every", type=int, default=1, help="Save mesh visualization every N steps")
-    parser.add_argument("--vis-dir", type=str, default=None, help="If set, also save each visualization PNG to this directory")
-    parser.add_argument("--verify-projection", action="store_true", help="Run projection sanity check before training and exit")
+    parser.add_argument(
+        "--n-stages", type=int, default=4, help="Number of deformation stages"
+    )
+    parser.add_argument(
+        "--n-gcn-blocks", type=int, default=3, help="GCN blocks per stage"
+    )
+    parser.add_argument(
+        "--num-workers",
+        type=int,
+        default=min(8, os.cpu_count() or 1),
+        help="Number of data loading workers",
+    )
+    parser.add_argument(
+        "--ckpt-dir",
+        type=str,
+        default="./checkpoints",
+        help="Directory to save checkpoints",
+    )
+    parser.add_argument(
+        "--resume-ckpt",
+        type=str,
+        default=None,
+        help="Path to checkpoint to resume from",
+    )
+    parser.add_argument(
+        "--vis-every", type=int, default=1, help="Save mesh visualization every N steps"
+    )
+    parser.add_argument(
+        "--vis-dir",
+        type=str,
+        default=None,
+        help="If set, also save each visualization PNG to this directory",
+    )
+    parser.add_argument(
+        "--verify-projection",
+        action="store_true",
+        help="Run projection sanity check before training and exit",
+    )
 
     args = parser.parse_args()
 
@@ -713,31 +911,65 @@ def main():
         print(f"Running on rank {rank}/{world_size} with device {device}")
 
     encoder = DINOv2FPNEncoder(freeze_backbone=True).to(device)
-    model = Furniture3D(encoder=encoder, hidden_dim=args.hidden_dim, n_stages=args.n_stages, n_gcn_blocks=args.n_gcn_blocks).to(device)
+    model = Furniture3D(
+        encoder=encoder,
+        hidden_dim=args.hidden_dim,
+        n_stages=args.n_stages,
+        n_gcn_blocks=args.n_gcn_blocks,
+    ).to(device)
 
-    model = DDP(model, device_ids=[rank] if torch.cuda.is_available() else None, find_unused_parameters=False)
+    model = DDP(
+        model,
+        device_ids=[rank] if torch.cuda.is_available() else None,
+        find_unused_parameters=False,
+    )
 
-    fpn_params = list(model.module.encoder.lateral.parameters()) + list(model.module.encoder.output_convs.parameters())
+    fpn_params = list(model.module.encoder.lateral.parameters()) + list(
+        model.module.encoder.output_convs.parameters()
+    )
     gcn_params = [p for n, p in model.module.named_parameters() if "encoder" not in n]
 
-    optimizer = torch.optim.AdamW([
-        {"params": fpn_params, "lr": args.lr_fpn},
-        {"params": gcn_params, "lr": args.lr_gcn},
-    ], weight_decay=1e-4)
+    optimizer = torch.optim.AdamW(
+        [
+            {"params": fpn_params, "lr": args.lr_fpn},
+            {"params": gcn_params, "lr": args.lr_gcn},
+        ],
+        weight_decay=1e-4,
+    )
 
     warmup_epochs = max(1, args.epochs // 20)
-    warmup = torch.optim.lr_scheduler.LinearLR(optimizer, start_factor=0.1, end_factor=1.0, total_iters=warmup_epochs)
-    cosine = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=max(1, args.epochs - warmup_epochs))
-    scheduler = torch.optim.lr_scheduler.SequentialLR(optimizer, schedulers=[warmup, cosine], milestones=[warmup_epochs])
+    warmup = torch.optim.lr_scheduler.LinearLR(
+        optimizer, start_factor=0.1, end_factor=1.0, total_iters=warmup_epochs
+    )
+    cosine = torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer, T_max=max(1, args.epochs - warmup_epochs)
+    )
+    scheduler = torch.optim.lr_scheduler.SequentialLR(
+        optimizer, schedulers=[warmup, cosine], milestones=[warmup_epochs]
+    )
 
     train_ds = Pix3DDataset(args.pix3d_root, "train", categories=["chair"])
     val_ds = Pix3DDataset(args.pix3d_root, "val", categories=["chair"])
 
-    train_sampler = DistributedSampler(train_ds, num_replicas=world_size, rank=rank, shuffle=True)
-    val_sampler = DistributedSampler(val_ds, num_replicas=world_size, rank=rank, shuffle=False)
+    train_sampler = DistributedSampler(
+        train_ds, num_replicas=world_size, rank=rank, shuffle=True
+    )
+    val_sampler = DistributedSampler(
+        val_ds, num_replicas=world_size, rank=rank, shuffle=False
+    )
 
-    train_loader = DataLoader(train_ds, batch_size=args.batch_size, sampler=train_sampler, num_workers=args.num_workers)
-    val_loader = DataLoader(val_ds, batch_size=args.batch_size, sampler=val_sampler, num_workers=args.num_workers)
+    train_loader = DataLoader(
+        train_ds,
+        batch_size=args.batch_size,
+        sampler=train_sampler,
+        num_workers=args.num_workers,
+    )
+    val_loader = DataLoader(
+        val_ds,
+        batch_size=args.batch_size,
+        sampler=val_sampler,
+        num_workers=args.num_workers,
+    )
 
     if rank == 0:
         print(f"Training dataset: {len(train_ds)} samples")
@@ -752,9 +984,20 @@ def main():
         cleanup_distributed()
         return
 
-    train(model, train_loader, val_loader, optimizer, scheduler,
-          args.epochs, device, rank, ckpt_dir=args.ckpt_dir, resume_ckpt=args.resume_ckpt,
-          vis_every=args.vis_every, vis_dir=args.vis_dir)
+    train(
+        model,
+        train_loader,
+        val_loader,
+        optimizer,
+        scheduler,
+        args.epochs,
+        device,
+        rank,
+        ckpt_dir=args.ckpt_dir,
+        resume_ckpt=args.resume_ckpt,
+        vis_every=args.vis_every,
+        vis_dir=args.vis_dir,
+    )
 
     cleanup_distributed()
 
