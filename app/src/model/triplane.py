@@ -570,6 +570,12 @@ class TriplaneNeRF(nn.Module):
         sigma_vol = torch.cat(sigmas, dim=1).view(resolution, resolution, resolution)
         sigma_np = sigma_vol.cpu().numpy()
 
+        s_min, s_max = float(sigma_np.min()), float(sigma_np.max())
+        print(f"  sigma range: [{s_min:.4f}, {s_max:.4f}]  threshold={threshold:.4f}")
+        if not (s_min < threshold < s_max):
+            threshold = s_min + 0.5 * (s_max - s_min)
+            print(f"  threshold out of range — clamped to median: {threshold:.4f}")
+
         verts, faces, _, _ = marching_cubes(sigma_np, level=threshold)
         # Rescale verts from [0, resolution-1] to [-bound, bound]
         verts = verts / (resolution - 1) * 2.0 * _SCENE_BOUND - _SCENE_BOUND

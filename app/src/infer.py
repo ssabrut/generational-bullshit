@@ -365,14 +365,17 @@ def _show_mesh(verts: np.ndarray, faces: np.ndarray, out_dir: str):
 
 
 if __name__ == "__main__":
+    import math as _math
+
     infer(
-        image_path="data/pix3d/img/chair/0003.png",
+        image_path="data/OmniObject3D/render/chair/chair_001/render/images/r_5.png",
         ckpt_path="checkpoints/triplane_epoch050.pth",
         out_dir="inference_out",
-        n_views=36,  # 360° turntable, one frame every 10°
+        n_views=36,
         render_h=256,
         render_w=256,
-        elevation=20.0,  # camera angle above horizon
-        radius=2.5,  # camera distance from object
-        extract_mesh=True,  # flip to True after: pip install scikit-image
+        focal=1.0 / _math.tan(0.6911112070083618 / 2.0),  # match training FoV (~39.6°)
+        elevation=20.0,
+        radius=4.03,  # match training radius
+        extract_mesh=True,
     )

@@ -388,7 +388,8 @@ def train(
     w_l2: float = 1e-4,
     val_every: int = 5,  # validate every N epochs
     resume: str = None,  # path to checkpoint to resume from
-    vis_dir: str = None,  # if set, save each dashboard PNG here
+    vis_dir: str = None,  # dashboard PNGs; defaults to {ckpt_dir}/plots
+    log_path: str = None,  # per-step loss CSV; defaults to {ckpt_dir}/train_loss.csv
     device: torch.device = None,
     visualise: bool = True,  # live dashboard via plt.show
 ):
@@ -397,6 +398,12 @@ def train(
     print(f"Training on: {device}")
 
     os.makedirs(ckpt_dir, exist_ok=True)
+    weights_dir = os.path.join(ckpt_dir, "weights")
+    os.makedirs(weights_dir, exist_ok=True)
+    if vis_dir is None:
+        vis_dir = os.path.join(ckpt_dir, "plots")
+    if log_path is None:
+        log_path = os.path.join(ckpt_dir, "train_loss.csv")
 
     # ── datasets ──────────────────────────────────────────────────────────────
     cats = categories or ["chair", "sofa"]
@@ -457,6 +464,15 @@ def train(
     print()
 
     vis = Visualiser(vis_dir=vis_dir) if visualise else None
+
+    log_dir = os.path.dirname(log_path)
+    if log_dir:
+        os.makedirs(log_dir, exist_ok=True)
+    log_is_new = not os.path.exists(log_path) or os.path.getsize(log_path) == 0
+    log_fh = open(log_path, "a", buffering=1)  # line-buffered
+    if log_is_new:
+        log_fh.write("step,epoch,batch,total,photo,tv,l2,lr\n")
+    print(f"Per-step loss log: {log_path}")
 
     from .model.triplane import (plane_l2_loss, plane_tv_loss,
                                  sample_along_rays, volume_render)
@@ -562,6 +578,13 @@ def train(
             epoch_losses.append(loss.item())
             global_step += 1
 
+            log_fh.write(
+                f"{global_step},{epoch},{batch_idx+1},"
+                f"{loss.item():.6f},{photo_loss.item():.6f},"
+                f"{tv_loss.item():.6f},{l2_loss.item():.6f},"
+                f"{optimizer.param_groups[0]['lr']:.3e}\n"
+            )
+
             # ── live dashboard update every step ──────────────────────────────
             if vis is not None:
                 vis.record(
@@ -600,6 +623,7 @@ def train(
         )
 
         # ── validation ────────────────────────────────────────────────────────
+        val_avg = None
         if epoch % val_every == 0 or epoch == n_epochs:
             model.eval()
             val_losses = []
@@ -634,11 +658,12 @@ def train(
 
             print(f"  [val]  epoch {epoch:3d} | val_loss={val_avg:.5f}")
 
-            ckpt_path = os.path.join(ckpt_dir, f"triplane_epoch{epoch:03d}.pth")
-            save_checkpoint(model, optimizer, epoch, global_step, val_avg, ckpt_path)
+        ckpt_path = os.path.join(weights_dir, f"triplane_epoch{epoch:03d}.pth")
+        save_checkpoint(model, optimizer, epoch, global_step, val_avg, ckpt_path)
 
         print()
 
+    log_fh.close()
     return model, history
 
 
@@ -728,8 +753,8 @@ if __name__ == "__main__":
         omni_root="data/OmniObject3D",
         ckpt_dir="checkpoints",
         categories=["chair", "sofa"],
-        n_epochs=50,
-        batch_size=2,
+        n_epochs=100,
+        batch_size=4,
         n_render_views=4,
         n_rays=512,
         render_size=256,
@@ -739,4 +764,6 @@ if __name__ == "__main__":
         w_l2=1e-4,
         val_every=5,
         resume=None,
+        vis_dir="checkpoints/plot",
+        log_path="checkpoints/train_loss.csv"
     )
