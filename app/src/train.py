@@ -42,7 +42,8 @@ from torchvision import transforms
 
 from .dataloader.omniobject3d import OmniObject3DDataset
 from .model.triplane import (TriplaneNeRF, cast_rays, compute_loss,
-                             make_optimizer, sample_triplane)
+                             make_optimizer, pts_to_triplane_coords,
+                             sample_triplane)
 
 # ── reproducibility ────────────────────────────────────────────────────────────
 torch.manual_seed(42)
@@ -80,6 +81,13 @@ class RenderViewLoader:
                 transforms.ToTensor(),  # → [3, H, W]  float32 in [0, 1]
             ]
         )
+        # Mask transform — no normalisation, alpha channel becomes [1, H, W] in [0, 1]
+        self._mask_tfm = transforms.Compose(
+            [
+                transforms.Resize((img_size, img_size)),
+                transforms.ToTensor(),
+            ]
+        )
 
     def _load_meta(self, cat: str, obj_id: str) -> dict:
         key = (cat, obj_id)
@@ -109,10 +117,16 @@ class RenderViewLoader:
         frames = random.sample(meta["frames"], k)
 
         img_dir = self.root / "render" / cat / obj_id / "render" / "images"
+        normal_dir = self.root / "render" / cat / obj_id / "render" / "normals"
         views = []
         for frame in frames:
             img_path = img_dir / f"{frame['file_path']}.png"
             rgb = self._tfm(Image.open(img_path).convert("RGB")).to(device)
+
+            # Silhouette mask from the normal map's alpha channel
+            normal_path = normal_dir / f"{frame['file_path']}_normal.png"
+            alpha = Image.open(normal_path).split()[-1]  # PIL "A" channel
+            mask = self._mask_tfm(alpha).to(device)  # [1, H, W] float in [0, 1]
 
             c2w = torch.tensor(
                 frame["transform_matrix"], dtype=torch.float32, device=device
@@ -120,6 +134,7 @@ class RenderViewLoader:
             views.append(
                 {
                     "rgb": rgb,
+                    "mask": mask,
                     "c2w": c2w,
                     "focal": torch.tensor(focal, dtype=torch.float32, device=device),
                 }
@@ -135,40 +150,53 @@ class RenderViewLoader:
 def render_view_loss(
     model: TriplaneNeRF,
     planes: torch.Tensor,  # [1, 3, C, H, W]  — pre-computed for this instance
-    view: dict,  # {"rgb":[3,H,W], "c2w":[4,4], "focal":[]}
+    view: dict,  # {"rgb":[3,H,W], "mask":[1,H,W], "c2w":[4,4], "focal":[]}
     n_rays: int,
     device: torch.device,
+    w_sil: float = 1.0,
+    fg_frac: float = 0.5,
 ) -> torch.Tensor:
     """
-    Cast n_rays into one target view, render them, return photometric L2+L1 loss.
+    Cast n_rays into one target view, render them, return photometric + silhouette loss.
     planes is computed once per instance and reused across all target views.
     """
     rgb_gt = view["rgb"]  # [3, H, W]
+    mask_gt = view["mask"]  # [1, H, W]
     c2w = view["c2w"].unsqueeze(0)  # [1, 4, 4]
     focal = view["focal"].unsqueeze(0)  # [1]
     _, H, W = rgb_gt.shape
 
-    rays_o, rays_d, pix_ij = cast_rays(c2w, focal, H, W, n_rays=n_rays, device=device)
+    rays_o, rays_d, pix_ij = cast_rays(
+        c2w, focal, H, W, n_rays=n_rays, device=device,
+        mask=mask_gt[0], fg_frac=fg_frac,
+    )
 
     # Volume render
     pts, t = _sample_rays(model, rays_o, rays_d)  # [1, R, S, 3], [1, R, S]
     B, R, S, _ = pts.shape
-    pts_norm = pts.clamp(-model.generator.plane_res, model.generator.plane_res)
-    pts_norm = pts.clamp(-1.2, 1.2) / 1.2
+    pts_norm = pts_to_triplane_coords(pts)
 
     pts_flat = pts_norm.view(1, R * S, 3)
     feats = sample_triplane(planes, pts_flat).view(1, R, S, -1)
-    sigma, rgb_raw = model.nerf_mlp(feats)
+
+    view_dirs = rays_d.unsqueeze(2).expand(-1, -1, S, -1)  # [1, R, S, 3]
+    sigma, rgb_raw = model.nerf_mlp(feats, view_dirs)
 
     from .model.triplane import volume_render
 
-    rgb_map, _, _ = volume_render(sigma, rgb_raw, t)  # [1, R, 3]
+    rgb_map, _, weights = volume_render(sigma, rgb_raw, t)  # [1, R, 3], _, [1, R, S]
+    opacity = weights.sum(-1)  # [1, R]
 
-    # GT pixels at sampled locations
-    rgb_gt_rays = rgb_gt[:, pix_ij[:, 0], pix_ij[:, 1]].T  # [R, 3]
-    rgb_gt_rays = rgb_gt_rays.unsqueeze(0)  # [1, R, 3]
+    # GT pixels + mask at sampled locations
+    rgb_gt_rays = rgb_gt[:, pix_ij[:, 0], pix_ij[:, 1]].T.unsqueeze(0)  # [1, R, 3]
+    mask_gt_rays = mask_gt[0, pix_ij[:, 0], pix_ij[:, 1]].view(1, R, 1)  # [1, R, 1]
 
-    return F.mse_loss(rgb_map, rgb_gt_rays) + 0.1 * F.l1_loss(rgb_map, rgb_gt_rays)
+    photo = F.mse_loss(rgb_map, rgb_gt_rays) + 0.1 * F.l1_loss(rgb_map, rgb_gt_rays)
+    sil = F.binary_cross_entropy(
+        opacity.unsqueeze(-1).clamp(1e-5, 1 - 1e-5),
+        (mask_gt_rays > 0.5).float(),
+    )
+    return photo + w_sil * sil
 
 
 def _sample_rays(model, rays_o, rays_d):
@@ -386,6 +414,8 @@ def train(
     lr_nerf: float = 5e-4,
     w_tv: float = 5e-5,  # halved — TV was over-smoothing thin structures
     w_l2: float = 1e-6,  # 100× lower — was suppressing useful plane activations
+    w_sil: float = 1.0,  # silhouette/opacity BCE weight (same order as photo MSE)
+    fg_frac: float = 0.5,  # fraction of rays sampled from the foreground mask
     val_every: int = 5,  # validate every N epochs
     resume: str = None,  # path to checkpoint to resume from
     vis_dir: str = None,  # dashboard PNGs; defaults to {ckpt_dir}/plots
@@ -433,8 +463,8 @@ def train(
         plane_res=96,
         nerf_hidden=192,
         n_samples=96,
-        near=1.5,
-        far=4.0,
+        near=3.0,
+        far=5.0,
     ).to(device)
     optimizer = make_optimizer(model, lr_gen=lr_gen, lr_nerf=lr_nerf)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
@@ -471,7 +501,7 @@ def train(
     log_is_new = not os.path.exists(log_path) or os.path.getsize(log_path) == 0
     log_fh = open(log_path, "a", buffering=1)  # line-buffered
     if log_is_new:
-        log_fh.write("step,epoch,batch,total,photo,tv,l2,lr\n")
+        log_fh.write("step,epoch,batch,total,photo,sil,tv,l2,lr\n")
     print(f"Per-step loss log: {log_path}")
 
     from .model.triplane import (plane_l2_loss, plane_tv_loss,
@@ -495,8 +525,9 @@ def train(
             img_feat = model.encoder(img)
             planes = model.generator(img_feat)
 
-            # Per-instance photometric loss across K render views
+            # Per-instance photometric + silhouette loss across K render views
             photo_loss = torch.tensor(0.0, device=device)
+            sil_loss = torch.tensor(0.0, device=device)
             # Keep one view's GT + predicted RGB for the dashboard (instance 0)
             _vis_gt_render = None
             _vis_pred_render = None
@@ -508,12 +539,14 @@ def train(
                 )
                 for vi, view in enumerate(views):
                     rgb_gt = view["rgb"]  # [3, H, W]
+                    mask_gt = view["mask"]  # [1, H, W]
                     c2w = view["c2w"].unsqueeze(0)  # [1, 4, 4]
                     focal = view["focal"].unsqueeze(0)  # [1]
                     _, H, W = rgb_gt.shape
 
                     rays_o, rays_d, pix_ij = cast_rays(
-                        c2w, focal, H, W, n_rays=n_rays, device=device
+                        c2w, focal, H, W, n_rays=n_rays, device=device,
+                        mask=mask_gt[0], fg_frac=fg_frac,
                     )
                     pts, t = sample_along_rays(
                         rays_o,
@@ -524,17 +557,26 @@ def train(
                         perturb=True,
                     )
                     R, S = pts.shape[1], pts.shape[2]
-                    pts_norm = pts.clamp(-1.2, 1.2) / 1.2
+                    pts_norm = pts_to_triplane_coords(pts)
                     feats = sample_triplane(plane_b, pts_norm.view(1, R * S, 3))
                     feats = feats.view(1, R, S, -1)
-                    sigma, rgb_raw = model.nerf_mlp(feats)
-                    rgb_map, _, _ = volume_render(sigma, rgb_raw, t)  # [1, R, 3]
+                    view_dirs = rays_d.unsqueeze(2).expand(-1, -1, S, -1)  # [1, R, S, 3]
+                    sigma, rgb_raw = model.nerf_mlp(feats, view_dirs)
+                    rgb_map, _, weights = volume_render(sigma, rgb_raw, t)
+                    opacity = weights.sum(-1)  # [1, R]
 
                     rgb_gt_rays = rgb_gt[:, pix_ij[:, 0], pix_ij[:, 1]].T.unsqueeze(0)
-                    view_loss = F.mse_loss(rgb_map, rgb_gt_rays) + 0.1 * F.l1_loss(
+                    mask_gt_rays = mask_gt[0, pix_ij[:, 0], pix_ij[:, 1]].view(1, R, 1)
+
+                    photo_view = F.mse_loss(rgb_map, rgb_gt_rays) + 0.1 * F.l1_loss(
                         rgb_map, rgb_gt_rays
                     )
-                    photo_loss = photo_loss + view_loss
+                    sil_view = F.binary_cross_entropy(
+                        opacity.unsqueeze(-1).clamp(1e-5, 1 - 1e-5),
+                        (mask_gt_rays > 0.5).float(),
+                    )
+                    photo_loss = photo_loss + photo_view
+                    sil_loss = sil_loss + sil_view
 
                     # Capture the first view of the first instance for the dashboard
                     if b == 0 and vi == 0 and vis is not None:
@@ -567,9 +609,10 @@ def train(
                             )
 
             photo_loss = photo_loss / (B * n_render_views)
+            sil_loss = sil_loss / (B * n_render_views)
             tv_loss = plane_tv_loss(planes)
             l2_loss = plane_l2_loss(planes)
-            loss = photo_loss + w_tv * tv_loss + w_l2 * l2_loss
+            loss = photo_loss + w_sil * sil_loss + w_tv * tv_loss + w_l2 * l2_loss
 
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
@@ -581,6 +624,7 @@ def train(
             log_fh.write(
                 f"{global_step},{epoch},{batch_idx+1},"
                 f"{loss.item():.6f},{photo_loss.item():.6f},"
+                f"{sil_loss.item():.6f},"
                 f"{tv_loss.item():.6f},{l2_loss.item():.6f},"
                 f"{optimizer.param_groups[0]['lr']:.3e}\n"
             )
@@ -608,6 +652,7 @@ def train(
                     f"batch {batch_idx+1}/{len(train_loader)} | "
                     f"loss {loss.item():.5f}  "
                     f"(photo={photo_loss.item():.5f} "
+                    f"sil={sil_loss.item():.5f} "
                     f"tv={tv_loss.item():.5f} "
                     f"l2={l2_loss.item():.5f})"
                 )
@@ -646,7 +691,8 @@ def train(
                         )
                         for view in views:
                             v_loss = v_loss + render_view_loss(
-                                model, plane_b, view, n_rays, device
+                                model, plane_b, view, n_rays, device,
+                                w_sil=w_sil, fg_frac=fg_frac,
                             )
                     val_losses.append((v_loss / (B * 2)).item())
 

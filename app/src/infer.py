@@ -74,8 +74,8 @@ def load_model(ckpt_path: str, device: torch.device) -> TriplaneNeRF:
         plane_res=plane_res,
         nerf_hidden=nerf_h,
         n_samples=n_samples,
-        near=1.5,
-        far=4.0,
+        near=3.0,
+        far=5.0,
     ).to(device)
     model.load_state_dict(state)
     model.eval()
@@ -376,7 +376,7 @@ if __name__ == "__main__":
 
     infer(
         image_path="data/OmniObject3D/render/chair/chair_001/render/images/r_5.png",
-        ckpt_path="checkpoints/weights/triplane_epoch100.pth",
+        ckpt_path="checkpoints/weights/triplane_epoch022.pth",
         out_dir="inference_out",
         n_views=36,
         render_h=256,

@@ -5,7 +5,7 @@ import torch.nn.functional as F
 _DINOV2_MODEL = "dinov2_vitb14"  # embed_dim = 768
 _PLANE_CH = 48  # feature channels per triplane
 _PLANE_RES = 96  # spatial resolution of each plane (H = W)
-_SCENE_BOUND = 1.2  # scene occupies [-bound, bound]^3
+_SCENE_BOUND = 0.5  # scene occupies [-bound, bound]^3 — matches OmniObject3D aabb ±0.4 + margin
 
 
 class ImageEncoder(nn.Module):
@@ -195,17 +195,39 @@ def sample_triplane(planes: torch.Tensor, xyz: torch.Tensor) -> torch.Tensor:
     return torch.cat([xy_feat, xz_feat, yz_feat], dim=-1)  # [B, N, 3*C]
 
 
+def positional_encoding(x: torch.Tensor, n_freqs: int = 4) -> torch.Tensor:
+    """sin/cos positional encoding at frequencies 2^k for k=0..n_freqs-1.
+
+    x: [..., D]  →  [..., 2 * n_freqs * D]
+    """
+    freqs = 2.0 ** torch.arange(n_freqs, device=x.device, dtype=x.dtype)  # [F]
+    xb = x.unsqueeze(-2) * freqs.view(-1, 1)                              # [..., F, D]
+    pe = torch.cat([xb.sin(), xb.cos()], dim=-1)                          # [..., F, 2D]
+    return pe.flatten(-2)                                                  # [..., F*2D]
+
+
 class NeRFMLP(nn.Module):
     """
-    Tiny MLP that maps triplane features → (density, RGB).
+    Tiny MLP that maps (triplane features, view-dir) → (density, RGB).
 
-    Input  : [B, N, 3*C]   triplane features per point
+    Input  : feats [B, N, 3*C], view_dirs [B, N, 3]  (unit vectors)
     Output : density [B, N, 1]  (pre-activation, apply softplus outside)
              colour  [B, N, 3]  (pre-activation, apply sigmoid outside)
+
+    View-dir is positionally encoded and concatenated into the colour head only.
+    Density depends on geometry features alone (standard NeRF convention).
     """
 
-    def __init__(self, feat_dim: int = 3 * _PLANE_CH, hidden: int = 128):
+    def __init__(
+        self,
+        feat_dim: int = 3 * _PLANE_CH,
+        hidden: int = 128,
+        view_pe_freqs: int = 4,
+    ):
         super().__init__()
+        self.view_pe_freqs = view_pe_freqs
+        view_dim = 2 * view_pe_freqs * 3  # sin+cos at F freqs, 3-vector → 6F
+
         self.density_net = nn.Sequential(
             nn.Linear(feat_dim, hidden),
             nn.GELU(),
@@ -213,19 +235,24 @@ class NeRFMLP(nn.Module):
             nn.GELU(),
             nn.Linear(hidden, 1),
         )
-        # Colour head takes density features + view direction (optional)
         self.colour_net = nn.Sequential(
-            nn.Linear(feat_dim, hidden),
+            nn.Linear(feat_dim + view_dim, hidden),
             nn.GELU(),
             nn.Linear(hidden, hidden),
             nn.GELU(),
             nn.Linear(hidden, 3),
         )
 
-    def forward(self, feats: torch.Tensor):
-        """feats: [B, N, feat_dim]  →  (sigma [B,N,1], rgb [B,N,3])"""
+    def forward(self, feats: torch.Tensor, view_dirs: torch.Tensor):
+        """
+        feats     : [B, N, feat_dim]
+        view_dirs : [B, N, 3]  unit vectors
+
+        Returns (sigma [B,N,1], rgb [B,N,3]).
+        """
         sigma = self.density_net(feats)  # [B, N, 1]  raw
-        rgb = self.colour_net(feats)  # [B, N, 3]  raw
+        view_pe = positional_encoding(view_dirs, self.view_pe_freqs)
+        rgb = self.colour_net(torch.cat([feats, view_pe], dim=-1))
         return sigma, rgb
 
 
@@ -284,9 +311,16 @@ def cast_rays(
     W: int,
     n_rays: int = 512,
     device: torch.device = torch.device("cpu"),
+    mask: torch.Tensor = None,  # [H, W] foreground prob; None → uniform
+    fg_frac: float = 0.5,        # fraction of rays drawn from mask>0 pixels
 ) -> tuple:
     """
     Sample random rays from the camera frustum.
+
+    If `mask` is provided, `fg_frac` of the rays are drawn (with replacement)
+    from pixels where mask > 0.5 and the remainder uniformly across the image.
+    This concentrates gradient on the object surface — without it most rays
+    land on background and contribute near-zero photometric gradient.
 
     Returns
     -------
@@ -296,9 +330,26 @@ def cast_rays(
     """
     B = c2w.shape[0]
 
-    # Random pixel indices
-    i_idx = torch.randint(0, H, (n_rays,), device=device)
-    j_idx = torch.randint(0, W, (n_rays,), device=device)
+    if mask is not None:
+        n_fg = int(n_rays * fg_frac)
+        n_bg = n_rays - n_fg
+        flat = (mask.reshape(-1) > 0.5).float()
+        if flat.sum() > 0 and n_fg > 0:
+            fg_idx = torch.multinomial(flat, n_fg, replacement=True)
+            i_fg = fg_idx // W
+            j_fg = fg_idx % W
+        else:
+            # Mask empty (degenerate) → fall back to uniform for fg slot too
+            i_fg = torch.randint(0, H, (n_fg,), device=device)
+            j_fg = torch.randint(0, W, (n_fg,), device=device)
+        i_bg = torch.randint(0, H, (n_bg,), device=device)
+        j_bg = torch.randint(0, W, (n_bg,), device=device)
+        i_idx = torch.cat([i_fg, i_bg]).to(device)
+        j_idx = torch.cat([j_fg, j_bg]).to(device)
+    else:
+        # Random pixel indices
+        i_idx = torch.randint(0, H, (n_rays,), device=device)
+        j_idx = torch.randint(0, W, (n_rays,), device=device)
 
     # Normalised device coords in [-1, 1] (matching grid_sample convention)
     # focal_norm = focal_px / (max(H,W)/2)  →  we stored it that way already
@@ -449,8 +500,11 @@ class TriplaneNeRF(nn.Module):
         feats = sample_triplane(planes, pts_flat)  # [B, R*S, 3C]
         feats = feats.view(B, R, S, -1)  # [B, R, S, 3C]
 
+        # View directions broadcast across the S samples on each ray
+        view_dirs = rays_d.unsqueeze(2).expand(-1, -1, S, -1)  # [B, R, S, 3]
+
         # MLP
-        sigma, rgb = self.nerf_mlp(feats)  # [B,R,S,1], [B,R,S,3]
+        sigma, rgb = self.nerf_mlp(feats, view_dirs)  # [B,R,S,1], [B,R,S,3]
 
         rgb_map, depth_map, weights = volume_render(sigma, rgb, t)
         return rgb_map, depth_map, weights
