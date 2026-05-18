@@ -22,6 +22,7 @@ import numpy as np
 import torch
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 from torch.utils.data import DataLoader, random_split
+from tqdm import tqdm
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -72,10 +73,10 @@ def render_points(pts: np.ndarray, ax, azim=30, elev=15) -> None:
     ax.set_box_aspect((1, 1, 1)); ax.view_init(elev, azim); ax.set_axis_off()
 
 
-def save_val_preview(model: Student, loader: DataLoader, device: str,
-                     out_path: Path, n_show: int = 6) -> None:
+def collect_val_samples(model: Student, loader: DataLoader, device: str,
+                        n_show: int = 6) -> list[dict]:
     model.eval()
-    collected = []
+    collected: list[dict] = []
     with torch.no_grad():
         for batch in loader:
             imgs = batch["image"].to(device)
@@ -94,29 +95,88 @@ def save_val_preview(model: Student, loader: DataLoader, device: str,
             if len(collected) >= n_show:
                 break
     model.train()
+    return collected
 
-    faces = model.template_faces.cpu().numpy()
-    fig = plt.figure(figsize=(3 * n_show, 9))
+
+def render_live_dashboard(fig, collected: list[dict], faces: np.ndarray,
+                          history: list[dict], epoch: int, n_show: int = 6) -> None:
+    """Refresh the persistent dashboard figure in place."""
+    fig.clear()
     mean = np.array([0.485, 0.456, 0.406]); std = np.array([0.229, 0.224, 0.225])
+
+    # Top 3 rows: input | target | prediction for n_show samples
+    # Bottom row spans all columns: live loss curve
+    n_rows = 4
     for i, c in enumerate(collected):
-        ax_img = fig.add_subplot(3, n_show, i + 1)
+        ax_img = fig.add_subplot(n_rows, n_show, i + 1)
         img = np.clip(c["image"] * std + mean, 0, 1)
         ax_img.imshow(img); ax_img.set_xticks([]); ax_img.set_yticks([])
         ax_img.set_title(c["entry"][:14], fontsize=7)
 
-        ax_tgt = fig.add_subplot(3, n_show, n_show + i + 1, projection="3d")
+        ax_tgt = fig.add_subplot(n_rows, n_show, n_show + i + 1, projection="3d")
         render_points(c["target"], ax_tgt)
         if i == 0:
             ax_tgt.set_title("target", fontsize=8)
 
-        ax_pred = fig.add_subplot(3, n_show, 2 * n_show + i + 1, projection="3d")
+        ax_pred = fig.add_subplot(n_rows, n_show, 2 * n_show + i + 1, projection="3d")
+        render_mesh(c["pred"], faces, ax_pred)
+        if i == 0:
+            ax_pred.set_title(f"pred (e{epoch})", fontsize=8)
+
+    # Loss curve across the full bottom row
+    ax_loss = fig.add_subplot(n_rows, 1, 4)
+    epochs = [h["epoch"] for h in history]
+    ax_loss.plot(epochs, [h["train"] for h in history],
+                 label="train", color="#aa3355", marker="o", markersize=3)
+    ax_loss.plot(epochs, [h["val"] for h in history],
+                 label="val", color="#3355aa", marker="o", markersize=3)
+    ax_loss.plot(epochs, [h["val_chamfer"] for h in history],
+                 label="val chamfer", color="#33aa55", linestyle="--", alpha=0.7)
+    ax_loss.set_xlabel("epoch"); ax_loss.set_ylabel("loss")
+    ax_loss.legend(loc="upper right", fontsize=8)
+    ax_loss.grid(alpha=0.3)
+    ax_loss.set_title(f"epoch {epoch} | val={history[-1]['val']:.4f} | "
+                      f"chamf={history[-1]['val_chamfer']:.4f}", fontsize=9)
+
+    fig.tight_layout()
+
+
+def save_val_preview(model: Student, loader: DataLoader, device: str,
+                     out_path: Path, history: list[dict], epoch: int,
+                     live_fig=None, n_show: int = 6) -> None:
+    collected = collect_val_samples(model, loader, device, n_show=n_show)
+    faces = model.template_faces.cpu().numpy()
+
+    # Snapshot PNG (single-epoch view, no loss curve)
+    snap = plt.figure(figsize=(3 * n_show, 9))
+    mean = np.array([0.485, 0.456, 0.406]); std = np.array([0.229, 0.224, 0.225])
+    for i, c in enumerate(collected):
+        ax_img = snap.add_subplot(3, n_show, i + 1)
+        img = np.clip(c["image"] * std + mean, 0, 1)
+        ax_img.imshow(img); ax_img.set_xticks([]); ax_img.set_yticks([])
+        ax_img.set_title(c["entry"][:14], fontsize=7)
+
+        ax_tgt = snap.add_subplot(3, n_show, n_show + i + 1, projection="3d")
+        render_points(c["target"], ax_tgt)
+        if i == 0:
+            ax_tgt.set_title("target", fontsize=8)
+
+        ax_pred = snap.add_subplot(3, n_show, 2 * n_show + i + 1, projection="3d")
         render_mesh(c["pred"], faces, ax_pred)
         if i == 0:
             ax_pred.set_title("prediction", fontsize=8)
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(out_path, dpi=110, bbox_inches="tight")
-    plt.close(fig)
+    snap.savefig(out_path, dpi=110, bbox_inches="tight")
+    plt.close(snap)
+
+    # Live dashboard (preds + loss curve), saved AND shown
+    if live_fig is not None:
+        render_live_dashboard(live_fig, collected, faces, history, epoch, n_show=n_show)
+        live_fig.savefig(out_path.parent / "live_dashboard.png",
+                         dpi=110, bbox_inches="tight")
+        live_fig.canvas.draw_idle()
+        plt.pause(0.001)
 
 
 # ── main ──────────────────────────────────────────────────────────────────────
@@ -191,14 +251,22 @@ def main() -> None:
     # ── train ─────────────────────────────────────────────────────────────────
     history: list[dict] = []
     best_val = float("inf")
-    print(f"\n{'epoch':>5} {'train':>10} {'val':>10} {'val_chamf':>10} {'lr':>10} {'sec':>6}")
 
-    for epoch in range(1, args.epochs + 1):
+    # Persistent live figure (preds + loss curve), updated each epoch
+    plt.ion()
+    live_fig = plt.figure("student-live", figsize=(3 * 6, 12))
+    plt.show(block=False)
+
+    print()
+    epoch_bar = tqdm(range(1, args.epochs + 1), desc="epochs", unit="ep", position=0)
+    for epoch in epoch_bar:
         # Train
         model.train()
         t_start = time.time()
         train_losses = []
-        for batch in train_loader:
+        train_bar = tqdm(train_loader, desc=f"train e{epoch:03d}", unit="batch",
+                         position=1, leave=False)
+        for batch in train_bar:
             imgs = batch["image"].to(device)
             tgts = batch["points"].to(device)
             out = model(imgs)
@@ -210,12 +278,16 @@ def main() -> None:
             opt.step()
             sched.step()
             train_losses.append(float(loss.detach()))
+            train_bar.set_postfix(loss=f"{train_losses[-1]:.4f}",
+                                  lr=f"{opt.param_groups[0]['lr']:.2e}")
 
         # Val
         model.eval()
         val_losses, val_chamfers = [], []
+        val_bar = tqdm(val_loader, desc=f"  val e{epoch:03d}", unit="batch",
+                       position=1, leave=False)
         with torch.no_grad():
-            for batch in val_loader:
+            for batch in val_bar:
                 imgs = batch["image"].to(device)
                 tgts = batch["points"].to(device)
                 out = model(imgs)
@@ -223,6 +295,8 @@ def main() -> None:
                                            w_chamfer=args.w_chamfer, w_edge=args.w_edge, w_lap=args.w_lap)
                 val_losses.append(float(loss))
                 val_chamfers.append(comp["chamfer"])
+                val_bar.set_postfix(loss=f"{val_losses[-1]:.4f}",
+                                    chamf=f"{val_chamfers[-1]:.4f}")
 
         tr_avg  = float(np.mean(train_losses))
         val_avg = float(np.mean(val_losses))
@@ -232,8 +306,10 @@ def main() -> None:
 
         history.append({"epoch": epoch, "train": tr_avg, "val": val_avg,
                         "val_chamfer": val_chamf, "lr": lr_now, "sec": elapsed})
-        print(f"{epoch:>5d} {tr_avg:>10.4f} {val_avg:>10.4f} {val_chamf:>10.4f} "
-              f"{lr_now:>10.2e} {elapsed:>6.1f}")
+        tqdm.write(f"e{epoch:03d} | train {tr_avg:.4f} | val {val_avg:.4f} | "
+                   f"chamf {val_chamf:.4f} | lr {lr_now:.2e} | {elapsed:.1f}s")
+        epoch_bar.set_postfix(train=f"{tr_avg:.4f}", val=f"{val_avg:.4f}",
+                              chamf=f"{val_chamf:.4f}")
 
         # Checkpoint
         torch.save({"model": model.state_dict(), "epoch": epoch, "args": vars(args)},
@@ -243,10 +319,11 @@ def main() -> None:
             torch.save({"model": model.state_dict(), "epoch": epoch, "args": vars(args)},
                        args.out_dir / "best.pt")
 
-        # Preview
+        # Preview (snapshot PNG + live dashboard refresh)
         if epoch % args.preview_every == 0 or epoch == args.epochs:
             save_val_preview(model, val_loader, device,
-                             args.out_dir / f"preview_e{epoch:03d}.png")
+                             args.out_dir / f"preview_e{epoch:03d}.png",
+                             history=history, epoch=epoch, live_fig=live_fig)
 
         with open(args.out_dir / "history.json", "w") as f:
             json.dump(history, f, indent=2)
@@ -260,6 +337,9 @@ def main() -> None:
     ax.set_title(f"best val: {best_val:.4f}")
     fig.savefig(args.out_dir / "loss_curve.png", dpi=110, bbox_inches="tight")
     plt.close(fig)
+
+    plt.ioff()
+    plt.close(live_fig)
 
     print(f"\nDone. Best val loss = {best_val:.4f}")
     print(f"Artifacts in {args.out_dir}")
