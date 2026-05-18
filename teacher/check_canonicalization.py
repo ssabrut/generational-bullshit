@@ -6,6 +6,7 @@ need a different alignment strategy.
 
 Also tries a few common axis-swap corrections in case there's a constant offset.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -16,7 +17,6 @@ import matplotlib.pyplot as plt
 import numpy as np
 import trimesh
 from matplotlib.gridspec import GridSpec
-
 from render_previews import _cull_and_shade
 
 # Candidate "global" corrections to try if direct rot_mat.T fails.
@@ -29,10 +29,20 @@ CORRECTIONS = {
 }
 
 
-def render_panel(verts: np.ndarray, faces: np.ndarray, ax, bounds: np.ndarray, azim: float = 0, elev: float = 10) -> None:
+def render_panel(
+    verts: np.ndarray,
+    faces: np.ndarray,
+    ax,
+    bounds: np.ndarray,
+    azim: float = 0,
+    elev: float = 10,
+) -> None:
     front_faces, shaded = _cull_and_shade(verts, faces, azim, elev)
     from mpl_toolkits.mplot3d.art3d import Poly3DCollection
-    ax.add_collection3d(Poly3DCollection(verts[front_faces], facecolors=shaded, edgecolors="none"))
+
+    ax.add_collection3d(
+        Poly3DCollection(verts[front_faces], facecolors=shaded, edgecolors="none")
+    )
     ax.set_xlim(bounds[0, 0], bounds[1, 0])
     ax.set_ylim(bounds[0, 1], bounds[1, 1])
     ax.set_zlim(bounds[0, 2], bounds[1, 2])
@@ -43,8 +53,12 @@ def render_panel(verts: np.ndarray, faces: np.ndarray, ax, bounds: np.ndarray, a
 
 def main() -> None:
     p = argparse.ArgumentParser()
-    p.add_argument("--meshes-dir", type=Path, default=Path("data/teacher_meshes/chair_smoke"))
-    p.add_argument("--output", type=Path, default=Path("data/teacher_meshes/canon_check.png"))
+    p.add_argument(
+        "--meshes-dir", type=Path, default=Path("data/teacher_meshes/chair_smoke")
+    )
+    p.add_argument(
+        "--output", type=Path, default=Path("data/teacher_meshes/canon_check.png")
+    )
     args = p.parse_args()
 
     rows = sorted([d for d in args.meshes_dir.iterdir() if d.is_dir()])
@@ -81,20 +95,32 @@ def main() -> None:
 
     shared_bounds = {
         c: np.stack(
-            [np.min([b[0] for b in bounds_by_col[c]], axis=0),
-             np.max([b[1] for b in bounds_by_col[c]], axis=0)]
-        ) for c in col_names
+            [
+                np.min([b[0] for b in bounds_by_col[c]], axis=0),
+                np.max([b[1] for b in bounds_by_col[c]], axis=0),
+            ]
+        )
+        for c in col_names
     }
 
     for r, d in enumerate(rows):
         for c, cname in enumerate(col_names):
             ax = fig.add_subplot(gs[r, c], projection="3d")
-            render_panel(cached_verts[cname][r], cached_faces[r], ax, shared_bounds[cname])
+            render_panel(
+                cached_verts[cname][r], cached_faces[r], ax, shared_bounds[cname]
+            )
             if r == 0:
                 ax.set_title(cname, fontsize=10)
             if c == 0:
-                ax.text2D(-0.1, 0.5, d.name, transform=ax.transAxes,
-                          rotation=90, va="center", fontsize=7)
+                ax.text2D(
+                    -0.1,
+                    0.5,
+                    d.name,
+                    transform=ax.transAxes,
+                    rotation=90,
+                    va="center",
+                    fontsize=7,
+                )
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(args.output, dpi=110, bbox_inches="tight")

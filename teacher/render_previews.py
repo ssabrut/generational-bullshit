@@ -4,6 +4,7 @@ This is for visually checking canonicalization: if the meshes all come out
 upright and facing the same way, no extra pose alignment is needed; if not,
 we need to add an alignment step before using them as student supervision.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -89,10 +90,19 @@ def render_mesh(
 
 def main() -> None:
     p = argparse.ArgumentParser()
-    p.add_argument("--meshes-dir", type=Path, default=Path("data/teacher_meshes/chair_smoke"))
-    p.add_argument("--output", type=Path, default=Path("data/teacher_meshes/chair_smoke_preview.png"))
-    p.add_argument("--shared-bounds", action="store_true",
-                   help="Use a single world bbox across all rows (shows scale variation across instances)")
+    p.add_argument(
+        "--meshes-dir", type=Path, default=Path("data/teacher_meshes/chair_smoke")
+    )
+    p.add_argument(
+        "--output",
+        type=Path,
+        default=Path("data/teacher_meshes/chair_smoke_preview.png"),
+    )
+    p.add_argument(
+        "--shared-bounds",
+        action="store_true",
+        help="Use a single world bbox across all rows (shows scale variation across instances)",
+    )
     args = p.parse_args()
 
     rows = sorted([d for d in args.meshes_dir.iterdir() if d.is_dir()])
@@ -114,7 +124,8 @@ def main() -> None:
     for r, d in enumerate(rows):
         ax = fig.add_subplot(gs[r, 0])
         ax.imshow(Image.open(d / "input.png"))
-        ax.set_xticks([]); ax.set_yticks([])
+        ax.set_xticks([])
+        ax.set_yticks([])
         ax.set_ylabel(d.name, fontsize=8)
         if r == 0:
             ax.set_title("input", fontsize=9)
@@ -123,7 +134,8 @@ def main() -> None:
         for c, (name, _, _) in enumerate(VIEWS, start=1):
             ax = fig.add_subplot(gs[r, c])
             ax.imshow(views[c - 1])
-            ax.set_xticks([]); ax.set_yticks([])
+            ax.set_xticks([])
+            ax.set_yticks([])
             if r == 0:
                 ax.set_title(name, fontsize=9)
 

@@ -9,6 +9,7 @@ Strategy (empirically validated on 10 chairs):
 Returns 4x4 matrix M such that apply_transform(verts, M) puts the mesh
 in Pix3D's canonical frame (X-right, Y-up, Z-front).
 """
+
 from __future__ import annotations
 
 import numpy as np
@@ -23,9 +24,10 @@ _AZ_ROTS: list[np.ndarray] = []
 for _k in range(4):
     _a = _k * np.pi / 2
     _AZ_ROTS.append(
-        np.array([[np.cos(_a), 0, np.sin(_a)],
-                  [0,          1, 0         ],
-                  [-np.sin(_a),0, np.cos(_a)]], dtype=float)
+        np.array(
+            [[np.cos(_a), 0, np.sin(_a)], [0, 1, 0], [-np.sin(_a), 0, np.cos(_a)]],
+            dtype=float,
+        )
     )
 
 
@@ -37,7 +39,7 @@ def _procrustes(A: np.ndarray, B: np.ndarray) -> np.ndarray:
     U, sv, Vt = np.linalg.svd(H)
     D = np.diag([1.0, 1.0, np.sign(np.linalg.det(Vt.T @ U.T))])
     R = Vt.T @ D @ U.T
-    var_a = float((A0 ** 2).sum())
+    var_a = float((A0**2).sum())
     s = float(np.trace(np.diag(sv) @ D) / var_a) if var_a > 0 else 1.0
     t = mu_b - s * R @ mu_a
     M = np.eye(4)
@@ -46,7 +48,9 @@ def _procrustes(A: np.ndarray, B: np.ndarray) -> np.ndarray:
     return M
 
 
-def _icp_once(src: np.ndarray, tgt: np.ndarray, n_iter: int = 40) -> tuple[np.ndarray, float]:
+def _icp_once(
+    src: np.ndarray, tgt: np.ndarray, n_iter: int = 40
+) -> tuple[np.ndarray, float]:
     """Single-init similarity-ICP. Returns (4x4 cumulative transform, mean NN dist)."""
     tree = cKDTree(tgt)
     M_cum = np.eye(4)
@@ -96,7 +100,7 @@ def align_to_target(
     for R_az in _AZ_ROTS:
         # Initial placement: azimuth rotation + centroid match
         M_init = np.eye(4)
-        R_full = R_az @ _SWAP_ZY           # combined: swap then azimuth
+        R_full = R_az @ _SWAP_ZY  # combined: swap then azimuth
         M_init[:3, :3] = R_full
         M_init[:3, 3] = tgt_c - R_az @ src_c
 

@@ -3,6 +3,7 @@
 Pipeline: load image + mask, composite onto gray background, tight crop,
 square pad, resize, run TripoSR, save mesh + metadata for review.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -22,7 +23,9 @@ from tsr.system import TSR
 from tsr.utils import resize_foreground
 
 
-def pick_chair_entries(pix3d_json_path: Path, category: str, n: int, seed: int) -> list[dict]:
+def pick_chair_entries(
+    pix3d_json_path: Path, category: str, n: int, seed: int
+) -> list[dict]:
     """Pick N entries with distinct 3D models (avoids 10 photos of the same chair)."""
     with open(pix3d_json_path) as f:
         meta = json.load(f)
@@ -78,7 +81,9 @@ def prepare_image(
 def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument("--pix3d-root", type=Path, default=Path("data/pix3d"))
-    p.add_argument("--output", type=Path, default=Path("data/teacher_meshes/chair_smoke"))
+    p.add_argument(
+        "--output", type=Path, default=Path("data/teacher_meshes/chair_smoke")
+    )
     p.add_argument("--category", default="chair")
     p.add_argument("--n", type=int, default=10)
     p.add_argument("--seed", type=int, default=0)

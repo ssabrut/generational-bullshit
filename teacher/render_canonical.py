@@ -3,6 +3,7 @@
 If all 10 canonicalized meshes face the same way in the 'front' view, the
 alignment scheme is good and we can use it for the full cache.
 """
+
 from __future__ import annotations
 
 import json
@@ -32,7 +33,9 @@ def render_panel(verts, faces, ax, bounds, azim, elev):
     verts = verts @ _YUP_TO_ZUP.T
     bounds = np.stack([verts.min(0), verts.max(0)])
     front_faces, shaded = _cull_and_shade(verts, faces, azim, elev)
-    ax.add_collection3d(Poly3DCollection(verts[front_faces], facecolors=shaded, edgecolors="none"))
+    ax.add_collection3d(
+        Poly3DCollection(verts[front_faces], facecolors=shaded, edgecolors="none")
+    )
     ax.set_xlim(bounds[0, 0], bounds[1, 0])
     ax.set_ylim(bounds[0, 1], bounds[1, 1])
     ax.set_zlim(bounds[0, 2], bounds[1, 2])
@@ -71,7 +74,8 @@ def main():
     for r, (d, (verts, faces)) in enumerate(zip(rows, aligned_meshes)):
         ax = fig.add_subplot(gs[r, 0])
         ax.imshow(Image.open(d / "input.png"))
-        ax.set_xticks([]); ax.set_yticks([])
+        ax.set_xticks([])
+        ax.set_yticks([])
         ax.set_ylabel(f"{d.name}\ncost={costs[r]:.3f}", fontsize=7)
         if r == 0:
             ax.set_title("input", fontsize=9)
@@ -83,7 +87,9 @@ def main():
 
     fig.savefig(out_path, dpi=120, bbox_inches="tight")
     print(f"\nSaved → {out_path}")
-    print(f"costs: mean={np.mean(costs):.4f}, max={np.max(costs):.4f}, min={np.min(costs):.4f}")
+    print(
+        f"costs: mean={np.mean(costs):.4f}, max={np.max(costs):.4f}, min={np.min(costs):.4f}"
+    )
 
 
 if __name__ == "__main__":
