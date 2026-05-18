@@ -4,15 +4,16 @@ import torch.nn.functional as F
 
 _DINOV2_MODEL = "dinov2_vitb14"  # embed_dim = 768
 _PLANE_CH = 48  # feature channels per triplane
-_PLANE_RES = 96  # spatial resolution of each plane (H = W)
+_PLANE_RES = 128  # spatial resolution of each plane (H = W)
+_PATCH_GRID = 16  # DINOv2 ViT-B/14 at 224×224 → 16×16 = 256 patch tokens
 _SCENE_BOUND = 0.5  # scene occupies [-bound, bound]^3 — matches OmniObject3D aabb ±0.4 + margin
 
 
 class ImageEncoder(nn.Module):
     """
-    Encode a single image to a global feature vector via DINOv2 CLS token.
+    Encode a single image to spatial DINOv2 patch tokens.
 
-    Output: [B, 768]  (ViT-B embed_dim)
+    Output: [B, 256, 768]  — 16×16 patch grid, ViT-B embed_dim
     """
 
     def __init__(self, freeze: bool = True):
@@ -33,29 +34,33 @@ class ImageEncoder(nn.Module):
         self.embed_dim = self.dino.embed_dim  # 768
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """x: [B, 3, 224, 224]  →  [B, 768]"""
+        """x: [B, 3, 224, 224]  →  [B, 256, 768]  (16×16 patches)"""
         with torch.set_grad_enabled(self.dino.training):
             out = self.dino.forward_features(x)
-        return out["x_norm_clstoken"]  # [B, 768]
+        return out["x_norm_patchtokens"]  # [B, 256, 768]
 
 
 class TriplaneGenerator(nn.Module):
     """
-    Map a global image feature vector → three orthogonal feature planes.
+    Map DINOv2 patch tokens → three orthogonal feature planes.
 
     Architecture
     ------------
-    MLP: [B, 768] → [B, C * 3 * H * W]
-    Reshape to [B, 3, C, H, W] (XY / XZ / YZ planes).
+    Patches [B, 256, 768] are reshaped to a 16×16 spatial grid (the DINOv2
+    patch grid for 224/14 input). Three per-plane linear projections map each
+    token to seed_ch features for the XY, XZ, YZ planes respectively, giving
+    a spatial seed [B*3, seed_ch, 16, 16]. A ConvNet refiner with three
+    ConvTranspose×2 stages upsamples to plane_res (128 by default).
 
-    A small ConvNet refines each plane independently so the generator can
-    learn spatially-structured features rather than just a flat MLP output.
+    Per-plane projections let the three planes diverge from the start without
+    needing the refiner to learn distinct geometric remaps from shared seeds.
 
     Parameters
     ----------
-    in_dim   : input feature dim (768 for ViT-B)
     plane_ch : feature channels per plane
-    plane_res: spatial resolution H = W of each plane
+    plane_res: spatial resolution H = W of each plane  (must be 8× patch_grid)
+    patch_grid: spatial dim of the DINOv2 patch grid (16 for ViT-B/14 at 224)
+    in_dim   : input token dim (768 for ViT-B)
     """
 
     def __init__(
@@ -63,34 +68,26 @@ class TriplaneGenerator(nn.Module):
         in_dim: int = 768,
         plane_ch: int = _PLANE_CH,
         plane_res: int = _PLANE_RES,
+        patch_grid: int = _PATCH_GRID,
     ):
         super().__init__()
+        assert plane_res == patch_grid * 8, (
+            f"plane_res ({plane_res}) must be 8 × patch_grid ({patch_grid}) — "
+            "three ConvTranspose×2 stages."
+        )
         self.plane_ch = plane_ch
         self.plane_res = plane_res
-        # MLP outputs a small low-res seed (plane_res // 4), then ConvTranspose
-        # upsamples ×4 to the final resolution. This keeps the giant linear
-        # projection tractable while still producing high-res triplanes.
-        assert plane_res % 4 == 0, "plane_res must be divisible by 4"
-        seed_res = plane_res // 4
-        self.seed_res = seed_res
+        self.patch_grid = patch_grid
         seed_ch = plane_ch * 2  # wider at low-res, narrowed during upsample
         self.seed_ch = seed_ch
-        flat_dim = 3 * seed_ch * seed_res * seed_res
+        self.seed_res = patch_grid
 
-        hidden = 1024
-        self.mlp = nn.Sequential(
-            nn.Linear(in_dim, hidden),
-            nn.LayerNorm(hidden),
-            nn.GELU(),
-            nn.Linear(hidden, hidden),
-            nn.LayerNorm(hidden),
-            nn.GELU(),
-            nn.Linear(hidden, flat_dim),
-        )
+        # Per-plane token projection: each patch token → seed_ch features per plane.
+        self.token_proj_xy = nn.Linear(in_dim, seed_ch)
+        self.token_proj_xz = nn.Linear(in_dim, seed_ch)
+        self.token_proj_yz = nn.Linear(in_dim, seed_ch)
 
-        # Per-plane spatial refinement (shared weights across the 3 planes).
-        # ConvTranspose ×2, ×2 upsampling + refinement convs. Lets the model
-        # learn high-frequency structure (legs, edges) at full plane_res.
+        # Three-stage upsampling refiner: 16 → 32 → 64 → 128.
         self.refine = nn.Sequential(
             nn.Conv2d(seed_ch, seed_ch, 3, padding=1),
             nn.GELU(),
@@ -102,21 +99,31 @@ class TriplaneGenerator(nn.Module):
             nn.GELU(),
             nn.Conv2d(plane_ch, plane_ch, 3, padding=1),
             nn.GELU(),
+            nn.ConvTranspose2d(plane_ch, plane_ch, 4, stride=2, padding=1),  # ×2
+            nn.GELU(),
+            nn.Conv2d(plane_ch, plane_ch, 3, padding=1),
+            nn.GELU(),
             nn.Conv2d(plane_ch, plane_ch, 1),
         )
 
-    def forward(self, img_feat: torch.Tensor) -> torch.Tensor:
+    def forward(self, patches: torch.Tensor) -> torch.Tensor:
         """
-        img_feat : [B, in_dim]
-        Returns  : [B, 3, C, H, W]  — (XY, XZ, YZ) planes
+        patches : [B, P, in_dim]    P = patch_grid² (256 for ViT-B/14 at 224)
+        Returns : [B, 3, C, H, W]   — (XY, XZ, YZ) planes
         """
-        B = img_feat.shape[0]
-        flat = self.mlp(img_feat)  # [B, 3*seed_ch*seed_res^2]
-        planes = flat.view(B * 3, self.seed_ch, self.seed_res, self.seed_res)
-        planes = self.refine(planes)  # [B*3, plane_ch, plane_res, plane_res]
-        return planes.view(
-            B, 3, self.plane_ch, self.plane_res, self.plane_res
-        )  # [B, 3, C, H, W]
+        B, P, D = patches.shape
+        g = self.patch_grid
+        assert P == g * g, f"expected {g*g} patches, got {P}"
+
+        xy = self.token_proj_xy(patches)  # [B, P, seed_ch]
+        xz = self.token_proj_xz(patches)
+        yz = self.token_proj_yz(patches)
+        seed = torch.stack([xy, xz, yz], dim=1)  # [B, 3, P, seed_ch]
+        seed = seed.view(B * 3, g, g, self.seed_ch).permute(0, 3, 1, 2).contiguous()
+        # → [B*3, seed_ch, g, g]
+
+        planes = self.refine(seed)  # [B*3, plane_ch, plane_res, plane_res]
+        return planes.view(B, 3, self.plane_ch, self.plane_res, self.plane_res)
 
 
 def _bilinear_sample(plane: torch.Tensor, coords: torch.Tensor) -> torch.Tensor:
@@ -473,8 +480,8 @@ class TriplaneNeRF(nn.Module):
 
     def _planes_from_image(self, image: torch.Tensor) -> torch.Tensor:
         """image [B,3,224,224] → planes [B,3,C,H,W]"""
-        img_feat = self.encoder(image)  # [B, 768]
-        return self.generator(img_feat)  # [B, 3, C, H, W]
+        patches = self.encoder(image)  # [B, 256, 768]
+        return self.generator(patches)  # [B, 3, C, H, W]
 
     def _render_rays(
         self,
@@ -482,13 +489,15 @@ class TriplaneNeRF(nn.Module):
         rays_o: torch.Tensor,  # [B, R, 3]
         rays_d: torch.Tensor,  # [B, R, 3]
         perturb: bool = True,
+        near: float = None,
+        far: float = None,
     ) -> tuple:
         pts, t = sample_along_rays(
             rays_o,
             rays_d,
             n_samples=self.n_samples,
-            near=self.near,
-            far=self.far,
+            near=self.near if near is None else near,
+            far=self.far if far is None else far,
             perturb=perturb,
         )  # [B,R,S,3], [B,R,S]
 
@@ -548,11 +557,16 @@ class TriplaneNeRF(nn.Module):
         W: int,
         chunk: int = 1024,
         planes: torch.Tensor = None,  # [1, 3, C, Hp, Wp]  pre-computed; skips encoder
+        near: float = None,  # override self.near (e.g., for close-up self-render)
+        far: float = None,   # override self.far
     ) -> dict:
         """
         Render a complete H×W image in chunks (avoids OOM on CPU).
         Returns rgb [H, W, 3] and depth [H, W] on CPU.
         Pass `planes` to reuse already-computed triplane features (saves one encoder forward).
+        Pass `near`/`far` to override the model's default sampling range — needed
+        when rendering from a camera whose distance differs from training cams
+        (e.g., raw OmniObject3D cameras at ~1.2 vs render cameras at ~4.0).
         """
         device = image.device
         if planes is None:
@@ -591,7 +605,9 @@ class TriplaneNeRF(nn.Module):
             rays_d = F.normalize(rays_d, dim=-1)
             rays_o = c2w[:, :3, 3].unsqueeze(1).expand(-1, len(i_idx), -1)
 
-            rgb_c, depth_c, _ = self._render_rays(planes, rays_o, rays_d, perturb=False)
+            rgb_c, depth_c, _ = self._render_rays(
+                planes, rays_o, rays_d, perturb=False, near=near, far=far
+            )
             all_rgb.append(rgb_c[0].cpu())
             all_depth.append(depth_c[0].cpu())
 

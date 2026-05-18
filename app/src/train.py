@@ -225,6 +225,68 @@ def collate_fn(batch: list) -> dict:
     return out
 
 
+def loss_weights(epoch: int, w_sil_max: float = 0.6, w_tv: float = 5e-5,
+                 w_l2: float = 1e-6) -> dict:
+    """
+    Photometric warm-up schedule (tightened after observing the model
+    converged to "predict zero density" — high PSNR on full image, but black
+    foreground. Sil needs to engage sooner and stronger to penalise empty
+    predictions in the silhouette mask).
+
+    Epochs 1–5   : pure photometric (no silhouette/TV/L2). Photo gradient
+                   drives initial geometry; too long here and the model
+                   discovers the zero-density local minimum.
+    Epochs 6–15  : linear ramp w_sil → w_sil_max; TV and L2 turn on.
+    Epochs 16+   : hold w_sil at w_sil_max.
+    """
+    if epoch <= 5:
+        return {"w_sil": 0.0, "w_tv": 0.0, "w_l2": 0.0}
+    if epoch <= 15:
+        frac = (epoch - 5) / 10.0  # 0 → 1 over epochs 6..15
+        return {"w_sil": w_sil_max * frac, "w_tv": w_tv, "w_l2": w_l2}
+    return {"w_sil": w_sil_max, "w_tv": w_tv, "w_l2": w_l2}
+
+
+def psnr_from_mse(mse: float) -> float:
+    """PSNR in dB given an MSE on [0,1] images. Returns inf for mse==0."""
+    if mse <= 0:
+        return float("inf")
+    return -10.0 * float(np.log10(mse))
+
+
+def fg_psnr(pred: torch.Tensor, gt: torch.Tensor, mask: torch.Tensor) -> float:
+    """
+    Foreground-only PSNR.  Computes MSE over pixels where mask > 0.5 only,
+    so background-matches-background can't inflate the score.
+
+    pred, gt : [3, H, W]   floats in [0, 1]
+    mask     : [H, W] or [1, H, W]  foreground probability
+    """
+    if mask.dim() == 3:
+        mask = mask[0]
+    fg = mask > 0.5
+    if fg.sum() == 0:
+        return float("nan")
+    diff = (pred - gt).pow(2)         # [3, H, W]
+    fg_mse = diff[:, fg].mean().item()  # average over (3 channels × fg pixels)
+    return psnr_from_mse(fg_mse)
+
+
+def c2w_from_rot_trans(rot: torch.Tensor, trans: torch.Tensor) -> torch.Tensor:
+    """
+    Build a 4×4 c2w from the dataset's world-to-camera rot R and trans T,
+    where T = -R @ t_cam (see omniobject3d.c2w_to_Rt).
+
+    Inverse: c2w[:3,:3] = R^T, c2w[:3,3] = -R^T @ T.
+    """
+    Rt = rot.transpose(-1, -2)  # [3, 3]
+    t_cam = -(Rt @ trans.unsqueeze(-1)).squeeze(-1)  # [3]
+    c2w = torch.eye(4, dtype=rot.dtype, device=rot.device)
+    c2w[:3, :3] = Rt
+    c2w[:3, 3] = t_cam
+    return c2w
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Live visualiser
 # ─────────────────────────────────────────────────────────────────────────────
@@ -232,14 +294,18 @@ def collate_fn(batch: list) -> dict:
 
 class Visualiser:
     """
-    Live training dashboard — one window per step, same pattern as scripts/train.py.
+    Live training dashboard — one window per step.
 
-    Layout (1 row, 5 columns):
-      [0] Loss curves  — total / photometric / tv / l2 per step, val as dots
-      [1] Input image  — raw captured view fed to the encoder
-      [2] GT render    — synthetic target view used this step
-      [3] Predicted    — volume-rendered output at the same camera
-      [4] GT point cloud — X-Z top-down scatter of the pre-sampled PLY
+    Layout (1 row, 6 columns):
+      [0] Loss curves   — total / photo / sil / tv / l2, log-y, val dots
+      [1] Input image   — raw captured view fed to the encoder
+      [2] GT render     — synthetic target view used this step
+      [3] Predicted     — novel-view render at the target camera
+      [4] Self-render   — render at the encoder's *own* input view camera.
+                          If sharp here but blurry in [3], the bottleneck is
+                          generator multi-view consistency. If blurry here too,
+                          escalate to NeRFMLP capacity.
+      [5] GT point cloud — 3D scatter of the pre-sampled PLY
     """
 
     def __init__(self, vis_dir: str = None):
@@ -251,15 +317,17 @@ class Visualiser:
         self._steps: list = []
         self._total: list = []
         self._photo: list = []
+        self._sil: list = []
         self._tv: list = []
         self._l2: list = []
         self._val_steps: list = []
         self._val_loss: list = []
 
-    def record(self, step, total, photo, tv, l2):
+    def record(self, step, total, photo, sil, tv, l2):
         self._steps.append(step)
         self._total.append(total)
         self._photo.append(photo)
+        self._sil.append(sil)
         self._tv.append(tv)
         self._l2.append(l2)
 
@@ -273,37 +341,64 @@ class Visualiser:
         epoch: int,
         input_img: torch.Tensor,  # [3, 224, 224]  DINOv2-normalised
         gt_render: torch.Tensor,  # [3, H, W]      float32 in [0, 1]
-        pred_render: torch.Tensor,  # [3, H, W]      float32 in [0, 1]
+        pred_render: torch.Tensor,  # [3, H, W]    float32 in [0, 1]
         gt_pts: torch.Tensor,  # [N, 3]
+        self_render: torch.Tensor = None,  # [3, H, W]  optional input-view render
+        psnr: float = None,
+        psnr_fg: float = None,
+        fg_opacity: float = None,
         save_path: str = None,
     ):
-        fig = plt.figure(figsize=(22, 4))
+        fig = plt.figure(figsize=(24, 4))
         fig.patch.set_facecolor("#1a1a1a")
 
-        gs = fig.add_gridspec(1, 5, width_ratios=[2, 1, 1, 1, 1])
-        axes = [fig.add_subplot(gs[i]) for i in range(4)]
-        ax3d = fig.add_subplot(gs[4], projection="3d")
+        gs = fig.add_gridspec(1, 6, width_ratios=[2, 1, 1, 1, 1, 1])
+        axes = [fig.add_subplot(gs[i]) for i in range(5)]
+        ax3d = fig.add_subplot(gs[5], projection="3d")
         for ax in axes:
             ax.set_facecolor("#1a1a1a")
 
         # ── [0] loss curves ───────────────────────────────────────────────────
         ax = axes[0]
-        ax.plot(self._steps, self._total, color="#4A90D9", lw=1.5, label="total")
-        ax.plot(
-            self._steps, self._photo, color="#E8672A", lw=1.0, label="photo", alpha=0.85
-        )
-        ax.plot(self._steps, self._tv, color="#50C878", lw=0.8, label="tv", alpha=0.7)
-        ax.plot(self._steps, self._l2, color="#C8A84B", lw=0.8, label="l2", alpha=0.7)
+
+        def _safe(arr):
+            # Replace non-positives with a tiny floor so log-scale plotting works.
+            a = np.asarray(arr, dtype=float)
+            return np.where(a > 0, a, 1e-8)
+
+        ax.plot(self._steps, _safe(self._total), color="#4A90D9", lw=1.5, label="total")
+        ax.plot(self._steps, _safe(self._photo), color="#E8672A", lw=1.0,
+                label="photo", alpha=0.85)
+        ax.plot(self._steps, _safe(self._sil), color="#FF6B9D", lw=0.9,
+                label="sil", alpha=0.8)
+        ax.plot(self._steps, _safe(self._tv), color="#50C878", lw=0.8,
+                label="tv", alpha=0.7)
+        ax.plot(self._steps, _safe(self._l2), color="#C8A84B", lw=0.8,
+                label="l2", alpha=0.7)
         if self._val_steps:
             ax.scatter(
                 self._val_steps,
-                self._val_loss,
+                _safe(self._val_loss),
                 color="#FF6B9D",
                 s=40,
                 zorder=5,
                 label="val",
             )
-        ax.set_title(f"Loss  (epoch {epoch}, step {step})", color="white", fontsize=9)
+        ax.set_yscale("log")
+        # Clip y-axis so a single early spike doesn't compress everything else.
+        if len(self._total) >= 4:
+            lo = max(1e-6, float(np.percentile(_safe(self._photo), 1)) * 0.5)
+            hi = float(np.percentile(_safe(self._total), 95)) * 2.0
+            if hi > lo:
+                ax.set_ylim(lo, hi)
+        title = f"Loss  (epoch {epoch}, step {step})"
+        if psnr_fg is not None and not np.isnan(psnr_fg):
+            title += f"   PSNR_fg={psnr_fg:.2f} dB"
+        elif psnr is not None:
+            title += f"   PSNR={psnr:.2f} dB"
+        if fg_opacity is not None:
+            title += f"   fg_op={fg_opacity:.2f}"
+        ax.set_title(title, color="white", fontsize=9)
         ax.set_xlabel("step", color="#aaa", fontsize=8)
         ax.tick_params(colors="#aaa", labelsize=7)
         for sp in ax.spines.values():
@@ -311,7 +406,7 @@ class Visualiser:
         ax.legend(
             fontsize=7, facecolor="#2a2a2a", labelcolor="white", loc="upper right"
         )
-        ax.grid(True, linewidth=0.3, alpha=0.4, color="#444")
+        ax.grid(True, which="both", linewidth=0.3, alpha=0.4, color="#444")
 
         # ── [1] input image (undo DINOv2 normalisation) ───────────────────────
         mean = torch.tensor([0.485, 0.456, 0.406]).view(3, 1, 1)
@@ -326,12 +421,22 @@ class Visualiser:
         axes[2].set_title("GT render", color="white", fontsize=9)
         axes[2].axis("off")
 
-        # ── [3] predicted render ──────────────────────────────────────────────
+        # ── [3] predicted novel-view render ───────────────────────────────────
         axes[3].imshow(pred_render.cpu().clamp(0, 1).permute(1, 2, 0).numpy())
-        axes[3].set_title("Predicted", color="white", fontsize=9)
+        axes[3].set_title("Predicted (novel)", color="white", fontsize=9)
         axes[3].axis("off")
 
-        # ── [4] GT point cloud (interactive 3D) ──────────────────────────────
+        # ── [4] self-render at the encoder's input camera ─────────────────────
+        if self_render is not None:
+            axes[4].imshow(
+                self_render.cpu().clamp(0, 1).permute(1, 2, 0).numpy()
+            )
+            axes[4].set_title("Self-render", color="white", fontsize=9)
+        else:
+            axes[4].set_title("Self-render (n/a)", color="#888", fontsize=9)
+        axes[4].axis("off")
+
+        # ── [5] GT point cloud (interactive 3D) ──────────────────────────────
         p = gt_pts.cpu().numpy()
         ax3d.scatter(p[:, 0], p[:, 1], p[:, 2], s=1.5, c="#20B2AA", alpha=0.5)
         ax3d.set_facecolor("#1a1a1a")
@@ -414,7 +519,7 @@ def train(
     lr_nerf: float = 5e-4,
     w_tv: float = 5e-5,  # halved — TV was over-smoothing thin structures
     w_l2: float = 1e-6,  # 100× lower — was suppressing useful plane activations
-    w_sil: float = 1.0,  # silhouette/opacity BCE weight (same order as photo MSE)
+    w_sil: float = 0.6,  # silhouette/opacity BCE weight (cap for loss_weights ramp)
     fg_frac: float = 0.5,  # fraction of rays sampled from the foreground mask
     val_every: int = 5,  # validate every N epochs
     resume: str = None,  # path to checkpoint to resume from
@@ -460,7 +565,7 @@ def train(
     # ── model + optimizer ─────────────────────────────────────────────────────
     model = TriplaneNeRF(
         plane_ch=48,
-        plane_res=96,
+        plane_res=128,  # 8× the 16×16 DINOv2 patch grid
         nerf_hidden=192,
         n_samples=96,
         near=3.0,
@@ -501,7 +606,10 @@ def train(
     log_is_new = not os.path.exists(log_path) or os.path.getsize(log_path) == 0
     log_fh = open(log_path, "a", buffering=1)  # line-buffered
     if log_is_new:
-        log_fh.write("step,epoch,batch,total,photo,sil,tv,l2,lr\n")
+        log_fh.write(
+            "step,epoch,batch,total,photo,sil,tv,l2,lr,"
+            "w_sil,w_tv,w_l2,psnr,psnr_fg,fg_opacity\n"
+        )
     print(f"Per-step loss log: {log_path}")
 
     from .model.triplane import (plane_l2_loss, plane_tv_loss,
@@ -511,6 +619,15 @@ def train(
         model.train()
         epoch_losses = []
         t0 = time.time()
+
+        # Photometric warm-up schedule
+        ws = loss_weights(epoch, w_sil_max=w_sil, w_tv=w_tv, w_l2=w_l2)
+        w_sil_ep, w_tv_ep, w_l2_ep = ws["w_sil"], ws["w_tv"], ws["w_l2"]
+        if epoch == start_epoch or epoch in (11, 31):
+            print(
+                f"  loss weights @ epoch {epoch}: "
+                f"w_sil={w_sil_ep:.3f}  w_tv={w_tv_ep:.1e}  w_l2={w_l2_ep:.1e}"
+            )
 
         for batch_idx, batch in enumerate(train_loader):
             img = batch["image"].to(device)  # [B, 3, 224, 224]
@@ -522,15 +639,19 @@ def train(
             optimizer.zero_grad()
 
             # Encode all images → triplanes [B, 3, C, H, W]
-            img_feat = model.encoder(img)
-            planes = model.generator(img_feat)
+            patches = model.encoder(img)  # [B, 256, 768]
+            planes = model.generator(patches)
 
             # Per-instance photometric + silhouette loss across K render views
             photo_loss = torch.tensor(0.0, device=device)
             sil_loss = torch.tensor(0.0, device=device)
-            # Keep one view's GT + predicted RGB for the dashboard (instance 0)
+            # Diagnostics for the visualiser instance (b=0, first view)
             _vis_gt_render = None
             _vis_pred_render = None
+            _vis_self_render = None
+            _vis_psnr = None
+            _vis_psnr_fg = None
+            _vis_fg_opacity = None
 
             for b in range(B):
                 plane_b = planes[b : b + 1]
@@ -581,9 +702,13 @@ def train(
                     # Capture the first view of the first instance for the dashboard
                     if b == 0 and vi == 0 and vis is not None:
                         with torch.no_grad():
-                            # Full render at 64×64 — dense enough to evaluate
-                            # quality, fast enough to run every step on CPU.
-                            # Reuse already-computed planes (no second encoder pass).
+                            # Mean foreground opacity (diagnostic).
+                            fg_mask = (mask_gt_rays.view(-1) > 0.5)
+                            if fg_mask.any():
+                                _vis_fg_opacity = float(
+                                    opacity.view(-1)[fg_mask].mean().item()
+                                )
+                            # Full render at 64×64 — fast enough every step.
                             _VIS_H, _VIS_W = 64, 64
                             rendered = model.render_full(
                                 img[0:1],
@@ -607,12 +732,65 @@ def train(
                                 .squeeze(0)
                                 .cpu()
                             )
+                            mse_vis = F.mse_loss(
+                                _vis_pred_render, _vis_gt_render
+                            ).item()
+                            _vis_psnr = psnr_from_mse(mse_vis)
+                            # Foreground-only PSNR — background matches don't
+                            # inflate the score. Uses the GT silhouette mask
+                            # resized to the visualisation resolution.
+                            _vis_mask = (
+                                F.interpolate(
+                                    mask_gt.unsqueeze(0),
+                                    size=(_VIS_H, _VIS_W),
+                                    mode="bilinear",
+                                    align_corners=False,
+                                )
+                                .squeeze(0)
+                                .cpu()
+                            )
+                            _vis_psnr_fg = fg_psnr(
+                                _vis_pred_render, _vis_gt_render, _vis_mask
+                            )
+                            # Self-render: the encoder's own input view.
+                            # Raw cameras sit at ~1.2 from origin (vs render
+                            # cams at ~4.0). model.near/far are calibrated for
+                            # the render cams; pass an override that brackets
+                            # the scene as seen from this camera.
+                            rot_b = batch["rot"][0].to(device)  # [3, 3]
+                            trans_b = batch["trans"][0].to(device)  # [3]
+                            focal_b = batch["focal"][0].to(device).view(1)  # [1]
+                            c2w_self = c2w_from_rot_trans(rot_b, trans_b).unsqueeze(0)
+                            cam_dist = float(c2w_self[0, :3, 3].norm().item())
+                            # Scene fits in [-0.5,0.5]^3 → diagonal half-length
+                            # ≈ 0.87. Pad either side.
+                            self_near = max(0.05, cam_dist - 1.0)
+                            self_far = cam_dist + 1.0
+                            self_out = model.render_full(
+                                img[0:1],
+                                c2w_self,
+                                focal_b,
+                                H=_VIS_H,
+                                W=_VIS_W,
+                                chunk=_VIS_H * _VIS_W,
+                                planes=plane_b.detach(),
+                                near=self_near,
+                                far=self_far,
+                            )
+                            _vis_self_render = (
+                                self_out["rgb"].permute(2, 0, 1).clamp(0, 1)
+                            )
 
             photo_loss = photo_loss / (B * n_render_views)
             sil_loss = sil_loss / (B * n_render_views)
             tv_loss = plane_tv_loss(planes)
             l2_loss = plane_l2_loss(planes)
-            loss = photo_loss + w_sil * sil_loss + w_tv * tv_loss + w_l2 * l2_loss
+            loss = (
+                photo_loss
+                + w_sil_ep * sil_loss
+                + w_tv_ep * tv_loss
+                + w_l2_ep * l2_loss
+            )
 
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
@@ -626,7 +804,11 @@ def train(
                 f"{loss.item():.6f},{photo_loss.item():.6f},"
                 f"{sil_loss.item():.6f},"
                 f"{tv_loss.item():.6f},{l2_loss.item():.6f},"
-                f"{optimizer.param_groups[0]['lr']:.3e}\n"
+                f"{optimizer.param_groups[0]['lr']:.3e},"
+                f"{w_sil_ep:.4f},{w_tv_ep:.2e},{w_l2_ep:.2e},"
+                f"{(_vis_psnr if _vis_psnr is not None else float('nan')):.3f},"
+                f"{(_vis_psnr_fg if _vis_psnr_fg is not None else float('nan')):.3f},"
+                f"{(_vis_fg_opacity if _vis_fg_opacity is not None else float('nan')):.4f}\n"
             )
 
             # ── live dashboard update every step ──────────────────────────────
@@ -635,6 +817,7 @@ def train(
                     global_step,
                     loss.item(),
                     photo_loss.item(),
+                    sil_loss.item(),
                     tv_loss.item(),
                     l2_loss.item(),
                 )
@@ -645,6 +828,10 @@ def train(
                     gt_render=_vis_gt_render,
                     pred_render=_vis_pred_render,
                     gt_pts=gt_pts[0],
+                    self_render=_vis_self_render,
+                    psnr=_vis_psnr,
+                    psnr_fg=_vis_psnr_fg,
+                    fg_opacity=_vis_fg_opacity,
                 )
             else:
                 print(
@@ -680,8 +867,8 @@ def train(
                     ids = batch["instance"]
                     B = img.shape[0]
 
-                    img_feat = model.encoder(img)
-                    planes = model.generator(img_feat)
+                    patches = model.encoder(img)
+                    planes = model.generator(patches)
 
                     v_loss = torch.tensor(0.0, device=device)
                     for b in range(B):
@@ -692,7 +879,7 @@ def train(
                         for view in views:
                             v_loss = v_loss + render_view_loss(
                                 model, plane_b, view, n_rays, device,
-                                w_sil=w_sil, fg_frac=fg_frac,
+                                w_sil=w_sil_ep, fg_frac=fg_frac,
                             )
                     val_losses.append((v_loss / (B * 2)).item())
 

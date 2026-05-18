@@ -51,21 +51,23 @@ _DINO_TFM = transforms.Compose(
 
 
 def load_model(ckpt_path: str, device: torch.device) -> TriplaneNeRF:
-    """Load a TriplaneNeRF from a training checkpoint."""
+    """Load a TriplaneNeRF from a training checkpoint.
+
+    Arch (post-patch-token rewrite):
+      generator.token_proj_{xy,xz,yz}.weight : [seed_ch, in_dim]
+      generator.refine.<last_conv>.weight    : [plane_ch, plane_ch, k, k]
+      Three ConvTranspose×2 stages: plane_res = patch_grid × 8 = 128 (fixed).
+    """
     ckpt = torch.load(ckpt_path, map_location=device)
     state = ckpt.get("model", ckpt)  # support both raw state_dict and wrapped ckpt
 
-    # Infer arch from state dict so we don't need to hard-code it.
-    # Generator now: MLP → seed [seed_ch, seed_res, seed_res] → ConvTranspose ×4 → plane_res.
-    # The final 1×1 conv has out_channels = plane_ch.
     refine_keys = sorted(
         k for k in state if k.startswith("generator.refine.") and k.endswith(".weight")
     )
     plane_ch = state[refine_keys[-1]].shape[0]  # final 1×1 conv out-channels
-    seed_ch = state["generator.refine.0.weight"].shape[0]  # first conv in-channels
-    flat_dim = state["generator.mlp.6.weight"].shape[0]  # 3 * seed_ch * seed_res^2
-    seed_res = int(math.sqrt(flat_dim // (3 * seed_ch)))
-    plane_res = seed_res * 4  # two ×2 ConvTranspose layers
+    seed_ch = state["generator.token_proj_xy.weight"].shape[0]
+    # plane_res is determined by the DINOv2 patch grid (16) × 8 (three ConvT×2).
+    plane_res = 128
     nerf_h = state["nerf_mlp.density_net.0.weight"].shape[0]
     n_samples = 96  # not stored in ckpt — use training default
 
@@ -80,7 +82,10 @@ def load_model(ckpt_path: str, device: torch.device) -> TriplaneNeRF:
     model.load_state_dict(state)
     model.eval()
     print(f"Loaded checkpoint: {ckpt_path}")
-    print(f"  plane_ch={plane_ch}  plane_res={plane_res}  nerf_hidden={nerf_h}")
+    print(
+        f"  plane_ch={plane_ch}  plane_res={plane_res}  "
+        f"seed_ch={seed_ch}  nerf_hidden={nerf_h}"
+    )
     return model
 
 
