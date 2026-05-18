@@ -11,6 +11,7 @@ data/PNG/preprocessed/
 data/PNG/skeleton_corners/
 data/pix3d/
 data/OmniObject3D/
+data/teacher_meshes/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
