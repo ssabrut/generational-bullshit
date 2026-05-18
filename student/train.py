@@ -279,6 +279,8 @@ def main() -> None:
     )
     p.add_argument("--hflip-prob", type=float, default=0.5)
     p.add_argument("--color-jitter", type=float, default=0.2)
+    p.add_argument("--patience", type=int, default=15,
+                   help="Early-stop after N epochs with no val improvement (0 = off)")
     args = p.parse_args()
 
     device = pick_device(args.device)
@@ -359,6 +361,7 @@ def main() -> None:
     # ── train ─────────────────────────────────────────────────────────────────
     history: list[dict] = []
     best_val = float("inf")
+    epochs_no_improve = 0
 
     # Persistent live figure (preds + loss curve), updated each epoch
     plt.ion()
@@ -463,10 +466,19 @@ def main() -> None:
         )
         if val_avg < best_val:
             best_val = val_avg
+            epochs_no_improve = 0
             torch.save(
                 {"model": model.state_dict(), "epoch": epoch, "args": vars(args)},
                 args.out_dir / "best.pt",
             )
+        else:
+            epochs_no_improve += 1
+            if args.patience > 0 and epochs_no_improve >= args.patience:
+                tqdm.write(
+                    f"\nEarly stop: no val improvement for {args.patience} epochs "
+                    f"(best {best_val:.4f} at epoch {epoch - args.patience})"
+                )
+                break
 
         # Preview (snapshot PNG + live dashboard refresh)
         if epoch % args.preview_every == 0 or epoch == args.epochs:
