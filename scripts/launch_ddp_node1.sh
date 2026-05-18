@@ -12,10 +12,10 @@ cd "$(dirname "$0")/.."
 
 MASTER_ADDR=192.168.1.10
 MASTER_PORT=29500
-NPROC_PER_NODE=-1
+NPROC_PER_NODE=2          # MUST match node 0
 NNODES=2
 NODE_RANK=1
-GLOO_SOCKET_IFNAME=en7
+export GLOO_SOCKET_IFNAME=en7   # exported so torchrun's children inherit it
 
 EPOCHS="${EPOCHS:-20}"
 BATCH_SIZE="${BATCH_SIZE:-4}"
