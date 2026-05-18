@@ -4,6 +4,7 @@ Starts from an icosphere (642 verts, 1280 faces) and rescales to a chair-ish
 ellipsoid in Pix3D's canonical frame (Y-up). The student predicts per-vertex
 offsets from this template, in the same frame.
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -15,10 +16,12 @@ import trimesh
 
 @dataclass
 class Template:
-    verts: torch.Tensor       # (V, 3) float — initial template positions
-    faces: torch.Tensor       # (F, 3) long  — triangle indices
+    verts: torch.Tensor  # (V, 3) float — initial template positions
+    faces: torch.Tensor  # (F, 3) long  — triangle indices
     edge_index: torch.Tensor  # (2, E)  long — undirected edges (both directions)
-    laplacian: torch.Tensor   # (V, V)  sparse float — graph Laplacian (for smoothness loss)
+    laplacian: (
+        torch.Tensor
+    )  # (V, V)  sparse float — graph Laplacian (for smoothness loss)
 
 
 def _edges_from_faces(faces: np.ndarray) -> np.ndarray:
@@ -56,7 +59,9 @@ def build_template(
     Pix3D canonical chair bbox is roughly X:±0.30, Y:±0.40, Z:±0.30 (chair height ≈ 80cm).
     """
     mesh = trimesh.creation.icosphere(subdivisions=subdivisions)
-    verts = np.asarray(mesh.vertices, dtype=np.float32) * np.asarray(scale, dtype=np.float32)
+    verts = np.asarray(mesh.vertices, dtype=np.float32) * np.asarray(
+        scale, dtype=np.float32
+    )
     faces = np.asarray(mesh.faces, dtype=np.int64)
     edge_index = _edges_from_faces(faces)
     L = _graph_laplacian(len(verts), edge_index)

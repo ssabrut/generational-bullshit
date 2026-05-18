@@ -14,6 +14,7 @@ Notes on multi-node CPU DDP:
   batch_size * world_size.
 - Rank 0 owns all I/O: checkpoints, history.json, previews, tqdm bars.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -31,7 +32,7 @@ import numpy as np
 import torch
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
-from torch.utils.data import DataLoader, random_split
+from torch.utils.data import DataLoader, Subset
 from torch.utils.data.distributed import DistributedSampler
 from tqdm import tqdm
 
@@ -43,10 +44,14 @@ from student.dataset import TeacherCacheDataset
 from student.loss import compute_loss
 from student.model import Student
 from student.template import build_template
-from student.train import collect_val_samples, render_mesh, render_points  # reuse helpers
-
+from student.train import (
+    collect_val_samples,
+    render_mesh,  # reuse helpers
+    render_points,
+)
 
 # ── DDP setup ─────────────────────────────────────────────────────────────────
+
 
 def setup_ddp() -> tuple[int, int, int]:
     """Initialize the process group from torchrun-provided env vars.
@@ -76,8 +81,14 @@ def is_main(rank: int) -> bool:
 
 # ── preview (rank 0 only) ─────────────────────────────────────────────────────
 
-def save_preview_rank0(model: torch.nn.Module, loader: DataLoader, device: str,
-                       out_path: Path, n_show: int = 6) -> None:
+
+def save_preview_rank0(
+    model: torch.nn.Module,
+    loader: DataLoader,
+    device: str,
+    out_path: Path,
+    n_show: int = 6,
+) -> None:
     """Render val previews on the local rank-0 model only."""
     inner = model.module if isinstance(model, DDP) else model
     collected = collect_val_samples(inner, loader, device, n_show=n_show)
@@ -89,7 +100,9 @@ def save_preview_rank0(model: torch.nn.Module, loader: DataLoader, device: str,
     for i, c in enumerate(collected):
         ax_img = fig.add_subplot(3, n_show, i + 1)
         img = np.clip(c["image"] * std + mean, 0, 1)
-        ax_img.imshow(img); ax_img.set_xticks([]); ax_img.set_yticks([])
+        ax_img.imshow(img)
+        ax_img.set_xticks([])
+        ax_img.set_yticks([])
         ax_img.set_title(c["entry"][:14], fontsize=7)
 
         ax_tgt = fig.add_subplot(3, n_show, n_show + i + 1, projection="3d")
@@ -109,6 +122,7 @@ def save_preview_rank0(model: torch.nn.Module, loader: DataLoader, device: str,
 
 # ── all-reduce helpers ────────────────────────────────────────────────────────
 
+
 def all_reduce_mean(value: float, world_size: int) -> float:
     """Average a scalar loss across all ranks."""
     t = torch.tensor([value], dtype=torch.float64)
@@ -118,25 +132,37 @@ def all_reduce_mean(value: float, world_size: int) -> float:
 
 # ── main ──────────────────────────────────────────────────────────────────────
 
+
 def main() -> None:
     p = argparse.ArgumentParser()
-    p.add_argument("--cache",        type=Path, default=ROOT / "data/teacher_cache")
-    p.add_argument("--categories",   nargs="+", default=["chair", "sofa"])
-    p.add_argument("--out-dir",      type=Path, default=ROOT / "runs/student_ddp")
-    p.add_argument("--epochs",       type=int, default=10)
-    p.add_argument("--batch-size",   type=int, default=4,
-                   help="Per-rank batch size; global batch = batch_size * world_size")
-    p.add_argument("--lr",           type=float, default=1e-3)
+    p.add_argument("--cache", type=Path, default=ROOT / "data/teacher_cache")
+    p.add_argument("--categories", nargs="+", default=["chair", "sofa"])
+    p.add_argument("--out-dir", type=Path, default=ROOT / "runs/student_ddp")
+    p.add_argument("--epochs", type=int, default=10)
+    p.add_argument(
+        "--batch-size",
+        type=int,
+        default=4,
+        help="Per-rank batch size; global batch = batch_size * world_size",
+    )
+    p.add_argument("--lr", type=float, default=1e-3)
     p.add_argument("--weight-decay", type=float, default=1e-4)
-    p.add_argument("--val-split",    type=float, default=0.1)
-    p.add_argument("--hidden",       type=int, default=128)
-    p.add_argument("--n-stages",     type=int, default=1)
-    p.add_argument("--seed",         type=int, default=0)
-    p.add_argument("--num-workers",  type=int, default=0)
+    p.add_argument("--val-split", type=float, default=0.1)
+    p.add_argument("--hidden", type=int, default=128)
+    p.add_argument("--n-stages", type=int, default=1)
+    p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--num-workers", type=int, default=0)
     p.add_argument("--preview-every", type=int, default=1)
-    p.add_argument("--w-chamfer",    type=float, default=1.0)
-    p.add_argument("--w-edge",       type=float, default=0.01)
-    p.add_argument("--w-lap",        type=float, default=0.05)
+    p.add_argument("--w-chamfer", type=float, default=1.0)
+    p.add_argument("--w-edge", type=float, default=0.01)
+    p.add_argument("--w-lap", type=float, default=0.05)
+    p.add_argument(
+        "--augment",
+        action="store_true",
+        help="Enable H-flip + color jitter on training set",
+    )
+    p.add_argument("--hflip-prob", type=float, default=0.5)
+    p.add_argument("--color-jitter", type=float, default=0.2)
     args = p.parse_args()
 
     # ── DDP init ──────────────────────────────────────────────────────────────
@@ -149,39 +175,70 @@ def main() -> None:
     if is_main(rank):
         args.out_dir.mkdir(parents=True, exist_ok=True)
         with open(args.out_dir / "config.json", "w") as f:
-            json.dump({k: str(v) if isinstance(v, Path) else v for k, v in vars(args).items()},
-                      f, indent=2)
+            json.dump(
+                {
+                    k: str(v) if isinstance(v, Path) else v
+                    for k, v in vars(args).items()
+                },
+                f,
+                indent=2,
+            )
         print(f"[rank {rank}/{world_size}] world_size={world_size}  device={device}")
         print(f"[rank {rank}/{world_size}] cache={args.cache}  cats={args.categories}")
         print(f"[rank {rank}/{world_size}] out_dir={args.out_dir}")
 
     # ── data ──────────────────────────────────────────────────────────────────
-    # Important: all ranks must build IDENTICAL train/val splits. Use a fixed
-    # generator seeded the same on every rank, then wrap with DistributedSampler
-    # which shards the train set.
-    full_ds = TeacherCacheDataset(cache_root=args.cache, categories=tuple(args.categories))
-    n_val = max(1, int(round(len(full_ds) * args.val_split)))
-    n_train = len(full_ds) - n_val
-    train_ds, val_ds = random_split(
-        full_ds, [n_train, n_val],
-        generator=torch.Generator().manual_seed(args.seed),  # SAME on every rank
+    # All ranks must build IDENTICAL train/val splits. We build two dataset
+    # views (augmented train, clean val) over the same cache, then split by
+    # index with a generator seeded the same on every rank.
+    train_full = TeacherCacheDataset(
+        cache_root=args.cache,
+        categories=tuple(args.categories),
+        augment=args.augment,
+        hflip_prob=args.hflip_prob,
+        color_jitter=args.color_jitter,
     )
+    val_full = TeacherCacheDataset(
+        cache_root=args.cache,
+        categories=tuple(args.categories),
+        augment=False,
+    )
+    n_total = len(train_full)
+    n_val = max(1, int(round(n_total * args.val_split)))
+    n_train = n_total - n_val
+    perm = torch.randperm(
+        n_total, generator=torch.Generator().manual_seed(args.seed)
+    ).tolist()
+    train_idx, val_idx = perm[:n_train], perm[n_train:]
+    train_ds = Subset(train_full, train_idx)
+    val_ds = Subset(val_full, val_idx)
     if is_main(rank):
         print(f"[rank {rank}] dataset: {len(full_ds)} → train {n_train} / val {n_val}")
-        print(f"[rank {rank}] per-rank batch={args.batch_size}  "
-              f"global batch={args.batch_size * world_size}")
+        print(
+            f"[rank {rank}] per-rank batch={args.batch_size}  "
+            f"global batch={args.batch_size * world_size}"
+        )
 
     train_sampler = DistributedSampler(
-        train_ds, num_replicas=world_size, rank=rank,
-        shuffle=True, seed=args.seed, drop_last=True,
+        train_ds,
+        num_replicas=world_size,
+        rank=rank,
+        shuffle=True,
+        seed=args.seed,
+        drop_last=True,
     )
     train_loader = DataLoader(
-        train_ds, batch_size=args.batch_size, sampler=train_sampler,
-        num_workers=args.num_workers, drop_last=True,
+        train_ds,
+        batch_size=args.batch_size,
+        sampler=train_sampler,
+        num_workers=args.num_workers,
+        drop_last=True,
     )
     # Validation: rank 0 only evaluates the whole val set for stable comparable numbers.
     val_loader = DataLoader(
-        val_ds, batch_size=args.batch_size, shuffle=False,
+        val_ds,
+        batch_size=args.batch_size,
+        shuffle=False,
         num_workers=args.num_workers,
     )
 
@@ -228,8 +285,13 @@ def main() -> None:
         train_losses: list[float] = []
 
         if is_main(rank):
-            batch_iter = tqdm(train_loader, desc=f"train e{epoch:03d}",
-                              unit="batch", position=1, leave=False)
+            batch_iter = tqdm(
+                train_loader,
+                desc=f"train e{epoch:03d}",
+                unit="batch",
+                position=1,
+                leave=False,
+            )
         else:
             batch_iter = train_loader
 
@@ -238,8 +300,13 @@ def main() -> None:
             tgts = batch["points"].to(device)
             out = ddp_model(imgs)
             loss, _ = compute_loss(
-                out["verts"], tgts, model.template_edges, laplacian,
-                w_chamfer=args.w_chamfer, w_edge=args.w_edge, w_lap=args.w_lap,
+                out["verts"],
+                tgts,
+                model.template_edges,
+                laplacian,
+                w_chamfer=args.w_chamfer,
+                w_edge=args.w_edge,
+                w_lap=args.w_lap,
             )
             opt.zero_grad()
             loss.backward()  # DDP all-reduces grads here
@@ -275,8 +342,13 @@ def main() -> None:
                     tgts = batch["points"].to(device)
                     out = inner(imgs)
                     loss, comp = compute_loss(
-                        out["verts"], tgts, model.template_edges, laplacian,
-                        w_chamfer=args.w_chamfer, w_edge=args.w_edge, w_lap=args.w_lap,
+                        out["verts"],
+                        tgts,
+                        model.template_edges,
+                        laplacian,
+                        w_chamfer=args.w_chamfer,
+                        w_edge=args.w_edge,
+                        w_lap=args.w_lap,
                     )
                     val_losses.append(float(loss))
                     val_chamfers.append(comp["chamfer"])
@@ -293,25 +365,44 @@ def main() -> None:
         elapsed = time.time() - t_start
 
         if is_main(rank):
-            history.append({"epoch": epoch, "train": tr_global, "val": val_avg,
-                            "val_chamfer": val_chamf, "lr": lr_now, "sec": elapsed})
-            tqdm.write(f"e{epoch:03d} | train {tr_global:.4f} | val {val_avg:.4f} | "
-                       f"chamf {val_chamf:.4f} | lr {lr_now:.2e} | {elapsed:.1f}s")
+            history.append(
+                {
+                    "epoch": epoch,
+                    "train": tr_global,
+                    "val": val_avg,
+                    "val_chamfer": val_chamf,
+                    "lr": lr_now,
+                    "sec": elapsed,
+                }
+            )
+            tqdm.write(
+                f"e{epoch:03d} | train {tr_global:.4f} | val {val_avg:.4f} | "
+                f"chamf {val_chamf:.4f} | lr {lr_now:.2e} | {elapsed:.1f}s"
+            )
             epoch_iter.set_postfix(  # type: ignore[union-attr]
-                train=f"{tr_global:.4f}", val=f"{val_avg:.4f}", chamf=f"{val_chamf:.4f}",
+                train=f"{tr_global:.4f}",
+                val=f"{val_avg:.4f}",
+                chamf=f"{val_chamf:.4f}",
             )
 
             # Checkpoints (save the underlying module, not the DDP wrapper)
-            state = {"model": ddp_model.module.state_dict(),
-                     "epoch": epoch, "args": vars(args)}
+            state = {
+                "model": ddp_model.module.state_dict(),
+                "epoch": epoch,
+                "args": vars(args),
+            }
             torch.save(state, args.out_dir / "last.pt")
             if val_avg < best_val:
                 best_val = val_avg
                 torch.save(state, args.out_dir / "best.pt")
 
             if epoch % args.preview_every == 0 or epoch == args.epochs:
-                save_preview_rank0(ddp_model, val_loader, device,
-                                   args.out_dir / f"preview_e{epoch:03d}.png")
+                save_preview_rank0(
+                    ddp_model,
+                    val_loader,
+                    device,
+                    args.out_dir / f"preview_e{epoch:03d}.png",
+                )
 
             with open(args.out_dir / "history.json", "w") as f:
                 json.dump(history, f, indent=2)
@@ -324,8 +415,11 @@ def main() -> None:
         fig, ax = plt.subplots(figsize=(8, 4))
         epochs = [h["epoch"] for h in history]
         ax.plot(epochs, [h["train"] for h in history], label="train", color="#aa3355")
-        ax.plot(epochs, [h["val"]   for h in history], label="val",   color="#3355aa")
-        ax.set_xlabel("epoch"); ax.set_ylabel("loss"); ax.legend(); ax.grid(alpha=0.3)
+        ax.plot(epochs, [h["val"] for h in history], label="val", color="#3355aa")
+        ax.set_xlabel("epoch")
+        ax.set_ylabel("loss")
+        ax.legend()
+        ax.grid(alpha=0.3)
         ax.set_title(f"best val: {best_val:.4f} (DDP, world_size={world_size})")
         fig.savefig(args.out_dir / "loss_curve.png", dpi=110, bbox_inches="tight")
         plt.close(fig)

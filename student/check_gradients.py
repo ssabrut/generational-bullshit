@@ -8,6 +8,7 @@ For each named parameter we print:
 If cross-attention gradients are orders of magnitude smaller than e.g. the offset
 head, the image conditioning is weak — predictions will be image-agnostic.
 """
+
 from __future__ import annotations
 
 import sys
@@ -28,7 +29,9 @@ def main() -> None:
     torch.manual_seed(0)
     device = "cpu"
 
-    ds = TeacherCacheDataset(cache_root=ROOT / "data/teacher_cache", categories=("chair", "sofa"))
+    ds = TeacherCacheDataset(
+        cache_root=ROOT / "data/teacher_cache", categories=("chair", "sofa")
+    )
     print(f"dataset: {len(ds)} entries\n")
 
     # Build template and student
@@ -39,7 +42,7 @@ def main() -> None:
     laplacian = tpl.laplacian.to(device)
 
     # Run a forward + backward on a batch of 4 samples
-    imgs   = torch.stack([ds[i]["image"]  for i in range(4)]).to(device)
+    imgs = torch.stack([ds[i]["image"] for i in range(4)]).to(device)
     points = torch.stack([ds[i]["points"] for i in range(4)]).to(device)
     out = model(imgs)
     loss, comp = compute_loss(out["verts"], points, model.template_edges, laplacian)
@@ -50,14 +53,14 @@ def main() -> None:
     # Group params by where they live
     groups: dict[str, list[tuple[str, torch.nn.Parameter]]] = {
         "encoder (DinoV2, frozen)": [],
-        "embed (vert init)":        [],
-        "cross-attn q":             [],
-        "cross-attn k":             [],
-        "cross-attn v":             [],
-        "cross-attn out":           [],
-        "gcn1":                     [],
-        "gcn2":                     [],
-        "offset head":              [],
+        "embed (vert init)": [],
+        "cross-attn q": [],
+        "cross-attn k": [],
+        "cross-attn v": [],
+        "cross-attn out": [],
+        "gcn1": [],
+        "gcn2": [],
+        "offset head": [],
     }
     for name, p in model.named_parameters():
         if "encoder" in name:
@@ -79,7 +82,9 @@ def main() -> None:
         elif "offset_head" in name:
             groups["offset head"].append((name, p))
 
-    print(f"{'group':<30} {'#params':>10} {'param_norm':>12} {'grad_norm':>12} {'ratio':>10}")
+    print(
+        f"{'group':<30} {'#params':>10} {'param_norm':>12} {'grad_norm':>12} {'ratio':>10}"
+    )
     print("-" * 80)
     for gname, items in groups.items():
         n = sum(p.numel() for _, p in items)
@@ -91,7 +96,7 @@ def main() -> None:
             if p.grad is None:
                 continue
             gn_sq += float(p.grad.detach().norm() ** 2)
-        gn = gn_sq ** 0.5
+        gn = gn_sq**0.5
         ratio = gn / pn if pn > 0 else float("nan")
         print(f"{gname:<30} {n:>10d} {pn:>12.4f} {gn:>12.6f} {ratio:>10.4e}")
 
@@ -102,12 +107,16 @@ def main() -> None:
     deltas = pred - tpl.verts.unsqueeze(0)
     per_sample_norms = deltas.reshape(pred.shape[0], -1).norm(dim=-1)
     print(f"\nPer-sample deformation norm: {per_sample_norms.tolist()}")
-    print(f"  std across batch (higher = more image-conditioning): {per_sample_norms.std().item():.6f}")
+    print(
+        f"  std across batch (higher = more image-conditioning): {per_sample_norms.std().item():.6f}"
+    )
 
     # Diff between predictions: how much do two different inputs differ in output?
     diff = (pred[0] - pred[1]).norm()
     diff_self = (pred[0] - pred[0]).norm()
-    print(f"  ‖pred[0] - pred[1]‖ = {diff:.4f}   (sanity ‖pred[0] - pred[0]‖ = {diff_self:.4f})")
+    print(
+        f"  ‖pred[0] - pred[1]‖ = {diff:.4f}   (sanity ‖pred[0] - pred[0]‖ = {diff_self:.4f})"
+    )
 
 
 if __name__ == "__main__":
