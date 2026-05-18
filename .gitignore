@@ -12,6 +12,10 @@ data/PNG/skeleton_corners/
 data/pix3d/
 data/OmniObject3D/
 data/teacher_meshes/
+data/teacher_cache/
+
+# Teacher (cloned repo + HF model weights cache)
+teacher/TripoSR/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
