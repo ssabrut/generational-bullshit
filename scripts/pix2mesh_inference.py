@@ -31,7 +31,7 @@ from torchvision import transforms
 # ── paths ─────────────────────────────────────────────────────────────────────
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # WEIGHTS = os.path.join(ROOT, "Models", "pre-trained", "pix2mesh_pretrained.pt")
-WEIGHTS = os.path.join(ROOT, "runs", "pix2mesh_chair", "best.pt")
+WEIGHTS = os.path.join(ROOT, "runs", "pix2mesh_chair_v3", "best.pt")
 
 # ── VGG-like encoder ──────────────────────────────────────────────────────────
 #   Blocks 1-4 end with 2×2 maxpool.
@@ -435,7 +435,8 @@ def _is_dinov2_ckpt(path: str) -> bool:
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--image",   default="GAN/exports/chair.png")
+    # parser.add_argument("--image",   default="GAN/exports/chair.png")
+    parser.add_argument("--image",   default="/Users/rx0/Desktop/FoundationOfAIML/2/generational-bullshit/data/pix3d/img/chair/0001.png")
     parser.add_argument("--weights", default=WEIGHTS)
     parser.add_argument("--out",     default="GAN/exports/pix2mesh_out.obj")
     parser.add_argument("--device",  default="cpu")
@@ -483,7 +484,7 @@ def main():
         image = load_image(image_path).to(device)
 
         with torch.no_grad():
-            (p1, f1, _), (p2, f2, _), (p3, f3, _) = model(image, rot, trans, focal)
+            (p1, f1, _, _), (p2, f2, _, _), (p3, f3, _, _) = model(image, rot, trans, focal)
 
         stages = [(p1, f1), (p2, f2), (p3, f3)]
 
