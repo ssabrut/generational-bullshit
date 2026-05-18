@@ -57,4 +57,6 @@ def compute_loss(
     edge    = edge_length_reg(pred_verts, edge_index)
     lap     = laplacian_smoothness(pred_verts, laplacian)
     total   = w_chamfer * chamfer + w_edge * edge + w_lap * lap
-    return total, {"chamfer": float(chamfer), "edge": float(edge), "lap": float(lap)}
+    return total, {"chamfer": float(chamfer.detach()),
+                   "edge":    float(edge.detach()),
+                   "lap":     float(lap.detach())}
