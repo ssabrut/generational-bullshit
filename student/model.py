@@ -137,15 +137,37 @@ class DeformStage(nn.Module):
         return h_v, verts + delta
 
 
+class ColorHead(nn.Module):
+    """Per-vertex RGB head: h_v → (B, V, 3) in [0, 1]."""
+
+    def __init__(self, d: int):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(d, d),
+            nn.GELU(),
+            nn.Linear(d, 3),
+        )
+
+    def forward(self, h_v: torch.Tensor) -> torch.Tensor:
+        return torch.sigmoid(self.net(h_v))
+
+
 # ── Full student ──────────────────────────────────────────────────────────────
 
 
 class Student(nn.Module):
-    def __init__(self, template: Template, hidden: int = 128, n_stages: int = 1):
+    def __init__(
+        self,
+        template: Template,
+        hidden: int = 128,
+        n_stages: int = 1,
+        predict_color: bool = False,
+    ):
         super().__init__()
         self.encoder = DinoV2Encoder()
         self.embed = nn.Linear(3, hidden)
         self.stages = nn.ModuleList([DeformStage(hidden) for _ in range(n_stages)])
+        self.color_head = ColorHead(hidden) if predict_color else None
 
         # Register template tensors as buffers so .to(device) moves them.
         self.register_buffer("template_verts", template.verts)  # (V, 3)
@@ -162,9 +184,12 @@ class Student(nn.Module):
         for stage in self.stages:
             h_v, verts = stage(h_v, verts, patches, self.template_edges)
             all_verts.append(verts)
-        return {
+        out = {
             "verts": verts,  # final deformed verts (B, V, 3)
             "all_verts": all_verts,  # list over stages (for multi-stage Chamfer)
             "faces": self.template_faces,
             "edge_index": self.template_edges,
         }
+        if self.color_head is not None:
+            out["colors"] = self.color_head(h_v)  # (B, V, 3) in [0, 1]
+        return out

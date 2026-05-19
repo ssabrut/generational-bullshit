@@ -60,12 +60,31 @@ def pick_device(name: str) -> str:
 # ── visualization ─────────────────────────────────────────────────────────────
 
 
-def render_mesh(verts: np.ndarray, faces: np.ndarray, ax, azim=30, elev=15) -> None:
+def render_mesh(
+    verts: np.ndarray,
+    faces: np.ndarray,
+    ax,
+    azim=30,
+    elev=15,
+    vert_colors: np.ndarray | None = None,
+) -> None:
     v = verts @ _YUP_TO_ZUP.T
-    front, shaded = _cull_and_shade(v, faces, azim, elev)
-    ax.add_collection3d(
-        Poly3DCollection(v[front], facecolors=shaded, edgecolors="none")
-    )
+    # NOTE: _cull_and_shade returns the already-culled face array (F_front, 3),
+    # not a boolean mask. Index `v` with it directly.
+    front_faces, shaded = _cull_and_shade(v, faces, azim, elev)
+    if vert_colors is not None:
+        # Per-face RGB = mean of its 3 vertex colors, modulated by the
+        # Lambertian shading intensity so silhouettes still read.
+        face_rgb = vert_colors[front_faces].mean(axis=1)  # (F_front, 3)
+        intensity = shaded.mean(axis=1, keepdims=True)  # (F_front, 1)
+        face_rgb = np.clip(face_rgb * (0.4 + 0.6 * intensity), 0, 1)
+        ax.add_collection3d(
+            Poly3DCollection(v[front_faces], facecolors=face_rgb, edgecolors="none")
+        )
+    else:
+        ax.add_collection3d(
+            Poly3DCollection(v[front_faces], facecolors=shaded, edgecolors="none")
+        )
     b = np.stack([v.min(0), v.max(0)])
     ax.set_xlim(b[0, 0], b[1, 0])
     ax.set_ylim(b[0, 1], b[1, 1])
@@ -98,12 +117,16 @@ def collect_val_samples(
             tgts = batch["points"]
             out = model(imgs)
             verts = out["verts"].cpu().numpy()
+            colors = (
+                out["colors"].cpu().numpy() if "colors" in out else None
+            )
             for b in range(imgs.shape[0]):
                 collected.append(
                     {
                         "image": batch["image"][b].permute(1, 2, 0).numpy(),
                         "target": tgts[b].numpy(),
                         "pred": verts[b],
+                        "pred_colors": colors[b] if colors is not None else None,
                         "entry": batch["entry_id"][b],
                     }
                 )
@@ -145,7 +168,7 @@ def render_live_dashboard(
             ax_tgt.set_title("target", fontsize=8)
 
         ax_pred = fig.add_subplot(n_rows, n_show, 2 * n_show + i + 1, projection="3d")
-        render_mesh(c["pred"], faces, ax_pred)
+        render_mesh(c["pred"], faces, ax_pred, vert_colors=c.get("pred_colors"))
         if i == 0:
             ax_pred.set_title(f"pred (e{epoch})", fontsize=8)
 
@@ -220,7 +243,7 @@ def save_val_preview(
             ax_tgt.set_title("target", fontsize=8)
 
         ax_pred = snap.add_subplot(3, n_show, 2 * n_show + i + 1, projection="3d")
-        render_mesh(c["pred"], faces, ax_pred)
+        render_mesh(c["pred"], faces, ax_pred, vert_colors=c.get("pred_colors"))
         if i == 0:
             ax_pred.set_title("prediction", fontsize=8)
 
@@ -287,6 +310,13 @@ def main() -> None:
     p.add_argument("--color-jitter", type=float, default=0.2)
     p.add_argument("--patience", type=int, default=15,
                    help="Early-stop after N epochs with no val improvement (0 = off)")
+    p.add_argument(
+        "--w-color",
+        type=float,
+        default=0.0,
+        help="Per-vertex RGB L1 weight (0 = off). Needs baked texture in cache.",
+    )
+    p.add_argument("--n-color-points", type=int, default=4096)
     args = p.parse_args()
 
     device = pick_device(args.device)
@@ -316,11 +346,13 @@ def main() -> None:
         augment=args.augment,
         hflip_prob=args.hflip_prob,
         color_jitter=args.color_jitter,
+        n_color_points=args.n_color_points,
     )
     val_full = TeacherCacheDataset(
         cache_root=args.cache,
         categories=tuple(args.categories),
         augment=False,
+        n_color_points=args.n_color_points,
     )
     n_total = len(train_full)
     n_val = max(1, int(round(n_total * args.val_split)))
@@ -353,7 +385,12 @@ def main() -> None:
     tpl.verts = tpl.verts - tpl.verts.mean(dim=0, keepdim=True)
     tpl.verts = tpl.verts / tpl.verts.norm(dim=1).max()
 
-    model = Student(template=tpl, hidden=args.hidden, n_stages=args.n_stages).to(device)
+    model = Student(
+        template=tpl,
+        hidden=args.hidden,
+        n_stages=args.n_stages,
+        predict_color=args.w_color > 0,
+    ).to(device)
     laplacian = tpl.laplacian.to(device)
 
     trainable = [p for p in model.parameters() if p.requires_grad]
@@ -391,6 +428,9 @@ def main() -> None:
         for batch in train_bar:
             imgs = batch["image"].to(device)
             tgts = batch["points"].to(device)
+            c_pts = batch["color_points"].to(device)
+            c_rgb = batch["color_rgb"].to(device)
+            has_c = batch["has_color"].to(device)
             out = model(imgs)
             loss, _ = compute_loss(
                 out["verts"],
@@ -400,6 +440,11 @@ def main() -> None:
                 w_chamfer=args.w_chamfer,
                 w_edge=args.w_edge,
                 w_lap=args.w_lap,
+                pred_colors=out.get("colors"),
+                color_pts=c_pts,
+                color_rgb=c_rgb,
+                has_color=has_c,
+                w_color=args.w_color,
             )
             opt.zero_grad()
             loss.backward()
@@ -425,6 +470,9 @@ def main() -> None:
             for batch in val_bar:
                 imgs = batch["image"].to(device)
                 tgts = batch["points"].to(device)
+                c_pts = batch["color_points"].to(device)
+                c_rgb = batch["color_rgb"].to(device)
+                has_c = batch["has_color"].to(device)
                 out = model(imgs)
                 loss, comp = compute_loss(
                     out["verts"],
@@ -434,6 +482,11 @@ def main() -> None:
                     w_chamfer=args.w_chamfer,
                     w_edge=args.w_edge,
                     w_lap=args.w_lap,
+                    pred_colors=out.get("colors"),
+                    color_pts=c_pts,
+                    color_rgb=c_rgb,
+                    has_color=has_c,
+                    w_color=args.w_color,
                 )
                 val_losses.append(float(loss))
                 val_chamfers.append(comp["chamfer"])

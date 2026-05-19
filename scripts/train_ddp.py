@@ -111,7 +111,7 @@ def save_preview_rank0(
             ax_tgt.set_title("target", fontsize=8)
 
         ax_pred = fig.add_subplot(3, n_show, 2 * n_show + i + 1, projection="3d")
-        render_mesh(c["pred"], faces, ax_pred)
+        render_mesh(c["pred"], faces, ax_pred, vert_colors=c.get("pred_colors"))
         if i == 0:
             ax_pred.set_title("prediction", fontsize=8)
 
@@ -163,6 +163,18 @@ def main() -> None:
     p.add_argument("--w-edge", type=float, default=0.01)
     p.add_argument("--w-lap", type=float, default=0.05)
     p.add_argument(
+        "--w-color",
+        type=float,
+        default=0.0,
+        help="Per-vertex RGB L1 weight (0 = off). Needs canonical_mesh.obj + texture in cache.",
+    )
+    p.add_argument(
+        "--n-color-points",
+        type=int,
+        default=4096,
+        help="Colored surface samples per entry for the color target.",
+    )
+    p.add_argument(
         "--augment",
         action="store_true",
         help="Enable H-flip + color jitter on training set",
@@ -209,11 +221,13 @@ def main() -> None:
         augment=args.augment,
         hflip_prob=args.hflip_prob,
         color_jitter=args.color_jitter,
+        n_color_points=args.n_color_points,
     )
     val_full = TeacherCacheDataset(
         cache_root=args.cache,
         categories=tuple(args.categories),
         augment=False,
+        n_color_points=args.n_color_points,
     )
     n_total = len(train_full)
     n_val = max(1, int(round(n_total * args.val_split)))
@@ -262,7 +276,12 @@ def main() -> None:
     tpl.verts = tpl.verts - tpl.verts.mean(dim=0, keepdim=True)
     tpl.verts = tpl.verts / tpl.verts.norm(dim=1).max()
 
-    model = Student(template=tpl, hidden=args.hidden, n_stages=args.n_stages).to(device)
+    model = Student(
+        template=tpl,
+        hidden=args.hidden,
+        n_stages=args.n_stages,
+        predict_color=args.w_color > 0,
+    ).to(device)
     laplacian = tpl.laplacian.to(device)
 
     # Broadcast initial weights so every rank starts identically (defensive;
@@ -314,6 +333,9 @@ def main() -> None:
         for batch in batch_iter:
             imgs = batch["image"].to(device)
             tgts = batch["points"].to(device)
+            c_pts = batch["color_points"].to(device)
+            c_rgb = batch["color_rgb"].to(device)
+            has_c = batch["has_color"].to(device)
             out = ddp_model(imgs)
             loss, _ = compute_loss(
                 out["verts"],
@@ -323,6 +345,11 @@ def main() -> None:
                 w_chamfer=args.w_chamfer,
                 w_edge=args.w_edge,
                 w_lap=args.w_lap,
+                pred_colors=out.get("colors"),
+                color_pts=c_pts,
+                color_rgb=c_rgb,
+                has_color=has_c,
+                w_color=args.w_color,
             )
             opt.zero_grad()
             loss.backward()  # DDP all-reduces grads here
@@ -356,6 +383,9 @@ def main() -> None:
                 for batch in val_loader:
                     imgs = batch["image"].to(device)
                     tgts = batch["points"].to(device)
+                    c_pts = batch["color_points"].to(device)
+                    c_rgb = batch["color_rgb"].to(device)
+                    has_c = batch["has_color"].to(device)
                     out = inner(imgs)
                     loss, comp = compute_loss(
                         out["verts"],
@@ -365,6 +395,11 @@ def main() -> None:
                         w_chamfer=args.w_chamfer,
                         w_edge=args.w_edge,
                         w_lap=args.w_lap,
+                        pred_colors=out.get("colors"),
+                        color_pts=c_pts,
+                        color_rgb=c_rgb,
+                        has_color=has_c,
+                        w_color=args.w_color,
                     )
                     val_losses.append(float(loss))
                     val_chamfers.append(comp["chamfer"])

@@ -13,6 +13,7 @@ data/pix3d/
 data/OmniObject3D/
 data/teacher_meshes/
 data/teacher_cache/
+data/teacher_cache_sample/
 
 # Teacher (cloned repo + HF model weights cache)
 teacher/TripoSR/
