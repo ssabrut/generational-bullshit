@@ -1,3 +1,22 @@
+# Checkpoints
+checkpoints/
+vis/
+
+# Data
+data/PNG/corners/
+data/PNG/crop_and_pad/
+data/PNG/junctions/
+data/PNG/no_text/
+data/PNG/preprocessed/
+data/PNG/skeleton_corners/
+data/pix3d/
+data/OmniObject3D/
+data/teacher_meshes/
+data/teacher_cache/
+
+# Teacher (cloned repo + HF model weights cache)
+teacher/TripoSR/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
@@ -163,6 +182,7 @@ venv/
 ENV/
 env.bak/
 venv.bak/
+.claude/
 
 # Spyder project settings
 .spyderproject
