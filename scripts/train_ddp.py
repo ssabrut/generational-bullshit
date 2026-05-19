@@ -163,6 +163,12 @@ def main() -> None:
     )
     p.add_argument("--hflip-prob", type=float, default=0.5)
     p.add_argument("--color-jitter", type=float, default=0.2)
+    p.add_argument(
+        "--patience",
+        type=int,
+        default=15,
+        help="Early-stop after N epochs with no val improvement (0 = off)",
+    )
     args = p.parse_args()
 
     # ── DDP init ──────────────────────────────────────────────────────────────
@@ -213,7 +219,10 @@ def main() -> None:
     train_ds = Subset(train_full, train_idx)
     val_ds = Subset(val_full, val_idx)
     if is_main(rank):
-        print(f"[rank {rank}] dataset: {len(full_ds)} → train {n_train} / val {n_val}")
+        print(
+            f"[rank {rank}] dataset: {n_total} → train {n_train} / val {n_val}"
+            f"  (augment={args.augment})"
+        )
         print(
             f"[rank {rank}] per-rank batch={args.batch_size}  "
             f"global batch={args.batch_size * world_size}"
@@ -271,6 +280,7 @@ def main() -> None:
     # ── train loop ────────────────────────────────────────────────────────────
     history: list[dict] = []
     best_val = float("inf")
+    epochs_no_improve = 0
 
     if is_main(rank):
         print()
@@ -394,7 +404,10 @@ def main() -> None:
             torch.save(state, args.out_dir / "last.pt")
             if val_avg < best_val:
                 best_val = val_avg
+                epochs_no_improve = 0
                 torch.save(state, args.out_dir / "best.pt")
+            else:
+                epochs_no_improve += 1
 
             if epoch % args.preview_every == 0 or epoch == args.epochs:
                 save_preview_rank0(
@@ -407,8 +420,23 @@ def main() -> None:
             with open(args.out_dir / "history.json", "w") as f:
                 json.dump(history, f, indent=2)
 
+        # Early-stop decision: rank 0 decides, all ranks must agree to avoid
+        # collective-op hangs. Broadcast the stop flag as a 0/1 tensor.
+        should_stop = 0
+        if is_main(rank) and args.patience > 0 and epochs_no_improve >= args.patience:
+            tqdm.write(
+                f"\nEarly stop: no val improvement for {args.patience} epochs "
+                f"(best {best_val:.4f} at epoch {epoch - args.patience})"
+            )
+            should_stop = 1
+        stop_tensor = torch.tensor([should_stop], dtype=torch.int64)
+        dist.broadcast(stop_tensor, src=0)
+
         # Barrier so workers wait for rank 0 to finish I/O before the next epoch
         dist.barrier()
+
+        if int(stop_tensor.item()) == 1:
+            break
 
     # ── final plot (rank 0 only) ──────────────────────────────────────────────
     if is_main(rank):
