@@ -10,10 +10,10 @@ import easyocr
 @dataclass
 class PipelineResult:
     """
-    raw_no_text    : BGR image — text removed, NOT cropped (full original size).
+    raw_no_text    : BGR image — text removed, cropped to content bbox.
     preprocessed   : binary image — Gaussian blur + Otsu, cropped to content bbox.
     rotation_angle : clockwise angle (°) with the most text detections.
-    crop_bbox      : (x1, y1, x2, y2) in raw_no_text space — coordinate bridge.
+    crop_bbox      : (x1, y1, x2, y2) in the pre-crop (original) image space.
 
     Supports tuple unpacking:
         raw_no_text, preprocessed = preprocessor.process(image)
@@ -45,12 +45,8 @@ class FloorPlanPreprocessor:
 
     result.rotation_angle           # int — clockwise degrees for upright orientation
     result.crop_bbox                # (x1, y1, x2, y2) in raw_no_text space
-    result.raw_no_text              # BGR, text removed, NOT cropped
+    result.raw_no_text              # BGR, text removed, cropped to content bbox
     result.preprocessed             # binary, cropped — feed to skeletoniser
-
-    To get the cropped color image for YOLO:
-        x1, y1, x2, y2 = result.crop_bbox
-        cropped_color = result.raw_no_text[y1:y2, x1:x2]
     """
 
     def __init__(
@@ -83,9 +79,9 @@ class FloorPlanPreprocessor:
         raw_no_text, best_angle = self._remove_text(image)
 
         # Stage 2: binarise the text-free image
-        binary = self._enhance(raw_no_text, self.gaussian_ksize)
+        binary = self._enhance(raw_no_text)
 
-        # Stage 3: crop the binary image; raw_no_text is kept uncropped
+        # Stage 3: crop both images to content bbox
         preprocessed, crop_bbox = self._crop_and_pad(binary, self.crop_padding)
 
         raw_no_text_cropped = raw_no_text[crop_bbox[1]:crop_bbox[3], crop_bbox[0]:crop_bbox[2]]
@@ -137,37 +133,26 @@ class FloorPlanPreprocessor:
     # ── Stage 2: enhancement ──────────────────────────────────────────────────
 
     @staticmethod
-    def _enhance(image: np.ndarray, gaussian_ksize: int = 5) -> np.ndarray:
-        """Grayscale → Gaussian blur → Otsu binarisation."""
-        gray    = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-        _, thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
-            # noise removal
-        kernel = np.ones((3,3), np.uint8)
-        opening = cv2.morphologyEx(
-            thresh,
-            cv2.MORPH_OPEN,
-            kernel,
-            iterations=2,
-        )
-
-        sure_bg = cv2.dilate(
-            opening, kernel, iterations=3
-        )
-
-        dist_transform = cv2.distanceTransform(
-            opening, cv2.DIST_L2, 5
-        )
-        ret, sure_fg = cv2.threshold(
-            0.5 * dist_transform,
-            0.2 * dist_transform.max(),
-            255,
-            0,
-        )
-
-        sure_fg = np.uint8(sure_fg)
-        unknown = cv2.subtract(sure_bg, sure_fg)
-
-        return unknown
+    def _enhance(image: np.ndarray) -> np.ndarray:
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+        # area filter — drop specks smaller than 0.01 % of the image
+        num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(binary, connectivity=8)
+        cleaned  = np.zeros_like(binary)
+        min_area = max(50, int(binary.size * 0.0001))
+        for lid in range(1, num_labels):
+            if stats[lid, cv2.CC_STAT_AREA] >= min_area:
+                cleaned[labels == lid] = 255
+        k3       = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+        closed   = cv2.morphologyEx(cleaned, cv2.MORPH_CLOSE, k3)
+        smoothed = cv2.morphologyEx(closed,  cv2.MORPH_OPEN,  k3)
+        # drop dot residues whose bounding box is small in both axes
+        n2, lbl2, stats2, _ = cv2.connectedComponentsWithStats(smoothed, connectivity=8)
+        keep = np.zeros_like(smoothed)
+        for lid in range(1, n2):
+            if max(stats2[lid, cv2.CC_STAT_WIDTH], stats2[lid, cv2.CC_STAT_HEIGHT]) >= 25:
+                keep[lbl2 == lid] = 255
+        return keep
 
     # ── Stage 3: crop & pad ───────────────────────────────────────────────────
 
@@ -238,9 +223,6 @@ if __name__ == "__main__":
 
     out_dir = Path("../data/PNG")
     stem = Path(img_path).stem
-
-    x1, y1, x2, y2 = result.crop_bbox
-    cropped_color = result.raw_no_text[y1:y2, x1:x2]
 
     cv2.imwrite(str(out_dir / "no_text"      / f"{stem}.png"), result.raw_no_text)
     cv2.imwrite(str(out_dir / "crop_and_pad" / f"{stem}.png"), result.preprocessed)

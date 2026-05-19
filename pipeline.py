@@ -18,15 +18,16 @@ from preprocessing import FloorPlanPreprocessor, PipelineResult
 from window_detect import detect_windows_fm
 
 OPENING_CLASSES = {"door", "2door", "window"}
-SNAP_PX = 20  # bbox proximity (px) to count a corner as "touching" an opening
+SNAP_PX = 40  # search radius beyond the bbox edge for gap-corner candidates
 
 
 @dataclass
 class SkeletonGraph:
-    skeleton_raw: np.ndarray        # 1-px binary skeleton
-    skeleton_thick: np.ndarray      # dilated skeleton used for corner detection
-    corners: list[tuple[int, int]]  # NMS-filtered corners snapped onto skeleton
+    skeleton_raw: np.ndarray        # 1-px binary skeleton (after spur pruning)
+    skeleton_thick: np.ndarray      # dilated skeleton for visualisation
+    corners: list[tuple[int, int]]  # topology corners after NMS
     graph: nx.Graph                 # undirected wall graph (nodes=corners, edges=walls)
+    dag: nx.DiGraph                 # DFS spanning-forest DAG of the wall graph
 
 
 @dataclass
@@ -37,47 +38,42 @@ class FloorPlanOutput:
     json: dict[str, Any]            # structured JSON ready for export
 
 
-# ── Binary cleanup helpers ────────────────────────────────────────────────────
+# ── Skeleton helpers ──────────────────────────────────────────────────────────
 
-def _remove_noise(binary: np.ndarray, min_area_ratio: float = 0.0001) -> np.ndarray:
-    h, w = binary.shape
-    min_area = max(50, int(h * w * min_area_ratio))
-    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(binary, connectivity=8)
-    cleaned = np.zeros_like(binary)
-    for label_id in range(1, num_labels):
-        if stats[label_id, cv2.CC_STAT_AREA] >= min_area:
-            cleaned[labels == label_id] = 255
-    return cleaned
-
-
-def _morphological_cleanup(binary: np.ndarray, kernel_size: int = 3) -> np.ndarray:
-    if kernel_size <= 0:
-        return binary.copy()
-    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (kernel_size, kernel_size))
-    closed = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel)
-    return cv2.morphologyEx(closed, cv2.MORPH_OPEN, kernel)
+def _prune_spurs(skeleton: np.ndarray, iterations: int = 20) -> np.ndarray:
+    """Iteratively remove 1-neighbor skeleton pixels (dangling tips)."""
+    skel   = (skeleton > 0).astype(np.uint8)
+    kernel = np.ones((3, 3), np.uint8)
+    for _ in range(iterations):
+        n_count   = cv2.filter2D(skel, -1, kernel) - skel
+        endpoints = (skel == 1) & (n_count == 1)
+        if not endpoints.any():
+            break
+        skel[endpoints] = 0
+    return (skel * 255).astype(np.uint8)
 
 
-# ── Corner detection helpers ──────────────────────────────────────────────────
-
-def _detect_corners_polygon(
-    binary: np.ndarray,
-    min_area: int = 100,
-    epsilon_ratio: float = 0.001,
-) -> list[tuple[int, int]]:
-    contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+def _detect_corners_topology(skel_1px: np.ndarray) -> list[tuple[int, int]]:
+    """Return endpoints, junctions, and non-collinear bends on the skeleton."""
+    skel = (skel_1px > 0).astype(np.uint8)
+    n    = cv2.filter2D(skel, -1, np.ones((3, 3), np.uint8)) - skel
+    endpoints = (skel == 1) & (n == 1)
+    junctions = (skel == 1) & (n >= 3)
+    straight  = (
+        (cv2.filter2D(skel, -1, np.array([[0,0,0],[1,0,1],[0,0,0]], np.uint8)) == 2) |
+        (cv2.filter2D(skel, -1, np.array([[0,1,0],[0,0,0],[0,1,0]], np.uint8)) == 2) |
+        (cv2.filter2D(skel, -1, np.array([[1,0,0],[0,0,0],[0,0,1]], np.uint8)) == 2) |
+        (cv2.filter2D(skel, -1, np.array([[0,0,1],[0,0,0],[1,0,0]], np.uint8)) == 2)
+    )
+    bends   = (skel == 1) & (n == 2) & ~straight
     corners: list[tuple[int, int]] = []
-    for cnt in contours:
-        if cv2.contourArea(cnt) < min_area:
-            continue
-        epsilon = epsilon_ratio * cv2.arcLength(cnt, closed=True)
-        approx = cv2.approxPolyDP(cnt, epsilon, closed=True)
-        for pt in approx:
-            corners.append(tuple(pt[0]))
+    for mask in (endpoints, junctions, bends):
+        ys, xs = np.where(mask)
+        corners += [(int(x), int(y)) for x, y in zip(xs, ys)]
     return corners
 
 
-def _suppress_neighbors(corners: list[tuple[int, int]], radius: int = 25) -> list[tuple[int, int]]:
+def _suppress_neighbors(corners: list[tuple[int, int]], radius: int = 15) -> list[tuple[int, int]]:
     kept: list[tuple[int, int]] = []
     suppressed: set[int] = set()
     for i, (x0, y0) in enumerate(corners):
@@ -91,25 +87,50 @@ def _suppress_neighbors(corners: list[tuple[int, int]], radius: int = 25) -> lis
     return kept
 
 
-def _snap_to_skeleton(
-    corners: list[tuple[int, int]],
-    skeleton_1px: np.ndarray,
-    search_radius: int = 10,
-) -> list[tuple[int, int]]:
-    H, W = skeleton_1px.shape
-    snapped: list[tuple[int, int]] = []
-    for (x, y) in corners:
-        x, y = int(x), int(y)
-        x0, x1 = max(0, x - search_radius), min(W, x + search_radius + 1)
-        y0, y1 = max(0, y - search_radius), min(H, y + search_radius + 1)
-        window = skeleton_1px[y0:y1, x0:x1]
-        ys, xs = np.where(window > 0)
-        if len(xs) == 0:
-            continue
-        dx, dy = xs + x0 - x, ys + y0 - y
-        idx = np.argmin(dx * dx + dy * dy)
-        snapped.append((int(xs[idx] + x0), int(ys[idx] + y0)))
-    return snapped
+# ── Graph refinement helpers ──────────────────────────────────────────────────
+
+def _straighten_graph(G: nx.Graph, tol: int = 20) -> nx.Graph:
+    """Snap near-collinear nodes to a shared coordinate (removes staircase artifacts)."""
+    def cluster_snap(vals: np.ndarray, tol: int) -> np.ndarray:
+        order  = np.argsort(vals)
+        result = vals.copy()
+        i = 0
+        while i < len(order):
+            j = i + 1
+            while j < len(order) and vals[order[j]] - vals[order[i]] <= tol:
+                j += 1
+            result[order[i:j]] = round(vals[order[i:j]].mean())
+            i = j
+        return result
+    nodes = list(G.nodes())
+    xs    = np.array([G.nodes[n]["x"] for n in nodes], dtype=float)
+    ys    = np.array([G.nodes[n]["y"] for n in nodes], dtype=float)
+    xs_s, ys_s = cluster_snap(xs, tol), cluster_snap(ys, tol)
+    for i, n in enumerate(nodes):
+        G.nodes[n]["x"] = int(xs_s[i])
+        G.nodes[n]["y"] = int(ys_s[i])
+    return G
+
+
+def _filter_small_components(G: nx.Graph, min_edges: int = 3) -> nx.Graph:
+    """Drop connected components with fewer than min_edges (noise/dots)."""
+    keep: set[int] = set()
+    for comp in nx.connected_components(G):
+        if G.subgraph(comp).number_of_edges() >= min_edges:
+            keep.update(comp)
+    return G.subgraph(keep).copy()
+
+
+def _build_dag(G: nx.Graph) -> nx.DiGraph:
+    """Convert undirected wall graph to a DAG via DFS spanning forest."""
+    dag = nx.DiGraph()
+    for n, attr in G.nodes(data=True):
+        dag.add_node(n, **attr)
+    for comp in nx.connected_components(G):
+        sub = G.subgraph(comp)
+        for parent, child in nx.dfs_edges(sub, source=min(comp)):
+            dag.add_edge(parent, child, **sub[parent][child])
+    return dag
 
 
 # ── BFS edge discovery ────────────────────────────────────────────────────────
@@ -186,42 +207,47 @@ def detect_openings(
 
 def _gap_corners(G: nx.Graph, x1: float, y1: float, x2: float, y2: float) -> list[int]:
     """
-    For each side of the bbox, find corner nodes within SNAP_PX.
-    When multiple candidates exist on the same side, keep the one closest
-    to that side's edge (left-side → smallest x; top-side → smallest y;
-    right-side → largest x; bottom-side → largest y).
-    Returns at most one node-id per side (up to 4 total, deduped).
-    """
-    sides: list[tuple[str, list[tuple[float, int]]]] = [
-        ("left",   []),
-        ("right",  []),
-        ("top",    []),
-        ("bottom", []),
-    ]
+    Find the two wall-graph corners that bound this opening gap.
 
+    Strategy: collect all corner nodes within SNAP_PX of the expanded bbox,
+    prioritising degree-1 nodes (wall terminations at the gap) over junctions.
+    Then pick the closest such node, then the closest second node that lies on
+    the *opposite side* of the opening centre — ensuring the pair spans the gap.
+    """
+    cx, cy   = (x1 + x2) / 2, (y1 + y2) / 2
+    # expanded search box
+    bx1, by1 = x1 - SNAP_PX, y1 - SNAP_PX
+    bx2, by2 = x2 + SNAP_PX, y2 + SNAP_PX
+
+    candidates: list[tuple[int, float, int]] = []   # (degree, dist², node_id)
     for n, attr in G.nodes(data=True):
         if attr["kind"] != "corner":
             continue
-        cx, cy = attr["x"], attr["y"]
+        nx_, ny_ = attr["x"], attr["y"]
+        if not (bx1 <= nx_ <= bx2 and by1 <= ny_ <= by2):
+            continue
+        d2 = (nx_ - cx) ** 2 + (ny_ - cy) ** 2
+        candidates.append((G.degree(n), d2, n))
 
-        if (x1 - SNAP_PX) <= cx <= (x1 + SNAP_PX) and (y1 - SNAP_PX) <= cy <= (y2 + SNAP_PX):
-            sides[0][1].append((cx, n))          # left: sort ascending → closest to x1
-        if (x2 - SNAP_PX) <= cx <= (x2 + SNAP_PX) and (y1 - SNAP_PX) <= cy <= (y2 + SNAP_PX):
-            sides[1][1].append((-cx, n))         # right: sort ascending → closest to x2 (largest cx)
-        if (y1 - SNAP_PX) <= cy <= (y1 + SNAP_PX) and (x1 - SNAP_PX) <= cx <= (x2 + SNAP_PX):
-            sides[2][1].append((cy, n))          # top: sort ascending → closest to y1
-        if (y2 - SNAP_PX) <= cy <= (y2 + SNAP_PX) and (x1 - SNAP_PX) <= cx <= (x2 + SNAP_PX):
-            sides[3][1].append((-cy, n))         # bottom: sort ascending → closest to y2 (largest cy)
+    if not candidates:
+        return []
+
+    # degree-1 endpoints first, then by distance
+    candidates.sort()
 
     selected: list[int] = []
-    seen: set[int] = set()
-    for _, candidates in sides:
-        if candidates:
-            candidates.sort()
-            nid = candidates[0][1]
-            if nid not in seen:
-                selected.append(nid)
-                seen.add(nid)
+    for _, _, nid in candidates:
+        if not selected:
+            selected.append(nid)
+            continue
+        # second node must be on the opposite side of the centre from the first
+        n0   = G.nodes[selected[0]]
+        nk   = G.nodes[nid]
+        dot  = (n0["x"] - cx) * (nk["x"] - cx) + (n0["y"] - cy) * (nk["y"] - cy)
+        if dot <= 0:
+            selected.append(nid)
+            break
+
     return selected
 
 
@@ -464,60 +490,57 @@ def graph_to_json(G: nx.Graph) -> dict[str, Any]:
 
 def build_skeleton_graph(
     preprocessed: np.ndarray,
-    dilate_size: int = 3,
-    min_area: int = 100,
-    epsilon_ratio: float = 0.001,
-    nms_radius: int = 25,
-    snap_radius: int = 10,
+    spur_iter: int = 20,
+    corner_radius: int = 15,
+    tol: int = 20,
+    min_edges: int = 3,
 ) -> SkeletonGraph:
     """
     Build a wall graph from a binary (cropped, preprocessed) floor plan image.
 
+    Pipeline
+    --------
+    skeletonize → spur prune → topology corners → NMS →
+    BFS edges → graph → straighten → filter noise → DAG
+
     Parameters
     ----------
-    preprocessed : binary np.ndarray — output of FloorPlanPreprocessor.process()
-    dilate_size  : kernel size for thickening the 1-px skeleton before corner detection
-    min_area     : minimum contour area to consider during corner detection
-    epsilon_ratio: polygon approximation tolerance (smaller = more corners)
-    nms_radius   : non-maximum suppression radius in pixels
-    snap_radius  : search window for snapping corners onto the 1-px skeleton
+    preprocessed  : binary np.ndarray — output of FloorPlanPreprocessor.process()
+    spur_iter     : spur-pruning iterations (removes dangling skeleton tips)
+    corner_radius : NMS suppression radius in pixels
+    tol           : coordinate-snapping tolerance for graph straightening (px)
+    min_edges     : minimum edges a component must have to survive noise filtering
 
     Returns
     -------
-    SkeletonGraph with skeleton_raw, skeleton_thick, corners, and graph
+    SkeletonGraph with skeleton_raw, skeleton_thick, corners, graph, and dag
     """
-    # Preprocessor already crops to content — skip the redundant second crop
-    # to keep skeleton coordinates in the same space as raw_no_text (for YOLO).
-    binary = cv2.threshold(preprocessed, 127, 255, cv2.THRESH_BINARY)[1]
-    cleaned = _remove_noise(binary, min_area_ratio=0.0001)
-    smoothed = _morphological_cleanup(cleaned, kernel_size=3)
+    skeleton_raw    = (skeletonize(img_as_bool(preprocessed > 0)) * 255).astype(np.uint8)
+    skeleton_pruned = _prune_spurs(skeleton_raw, iterations=spur_iter)
+    skeleton_thick  = cv2.dilate(skeleton_pruned, cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3)))
 
-    # Skeletonize
-    skeleton_raw = (skeletonize(img_as_bool(smoothed)) * 255).astype(np.uint8)
+    corners = _suppress_neighbors(_detect_corners_topology(skeleton_pruned), radius=corner_radius)
+    edges   = _bfs_edges(corners, skeleton_pruned)
 
-    # Thicken for polygon corner detection
-    k = cv2.getStructuringElement(cv2.MORPH_RECT, (dilate_size, dilate_size))
-    skeleton_thick = cv2.dilate(skeleton_raw, k)
-
-    # Corner detection → NMS → snap onto 1-px skeleton
-    poly_corners = _detect_corners_polygon(skeleton_thick, min_area=min_area, epsilon_ratio=epsilon_ratio)
-    kept_corners = _suppress_neighbors(poly_corners, radius=nms_radius)
-    snapped = _snap_to_skeleton(kept_corners, skeleton_raw, search_radius=snap_radius)
-
-    # BFS edge discovery → NetworkX graph
-    edge_dict = _bfs_edges(snapped, skeleton_raw)
     G = nx.Graph()
-    for cid, (x, y) in enumerate(snapped):
+    for cid, (x, y) in enumerate(corners):
         G.add_node(cid, x=x, y=y, kind="corner")
-    for key, length in edge_dict.items():
+    for key, length in edges.items():
         a, b = tuple(key)
         G.add_edge(a, b, length=int(length), kind="wall")
 
+    G   = _straighten_graph(G, tol=tol)
+    G   = _filter_small_components(G, min_edges=min_edges)
+    dag = _build_dag(G)
+
+    corners = [(attr["x"], attr["y"]) for _, attr in G.nodes(data=True)]
+
     return SkeletonGraph(
-        skeleton_raw=skeleton_raw,
+        skeleton_raw=skeleton_pruned,
         skeleton_thick=skeleton_thick,
-        corners=snapped,
+        corners=corners,
         graph=G,
+        dag=dag,
     )
 
 
@@ -559,13 +582,12 @@ def run_pipeline(
     model = YOLO(str(model_path))
     openings = detect_openings(model, prep.raw_no_text, conf=conf, imgsz=imgsz)
 
-    # Supplement YOLO with feature-matching window detection.
-    # YOLO doors always win: pass all YOLO bboxes as suppression mask so any
-    # FM window candidate overlapping a YOLO detection is dropped.
+    # Supplement YOLO with template-matching detection for windows and doors.
+    # YOLO always wins: pass all YOLO bboxes so any FM hit that overlaps is dropped.
     gray = cv2.cvtColor(prep.raw_no_text, cv2.COLOR_BGR2GRAY)
     yolo_bboxes = [det["bbox"] for det in openings]
-    fm_windows = detect_windows_fm(gray, existing_bboxes=yolo_bboxes)
-    openings = openings + fm_windows   # YOLO first (higher conf / priority)
+    fm_openings = detect_windows_fm(gray, existing_bboxes=yolo_bboxes)
+    openings = openings + fm_openings   # YOLO first (higher conf / priority)
 
     # Work on a copy so skel.graph stays pure (corners + walls only)
     combined = skel.graph.copy()
