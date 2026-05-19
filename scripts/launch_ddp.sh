@@ -22,7 +22,7 @@
 #   GLOO_SOCKET_IFNAME — (optional) network interface, e.g. en0, en7.
 #
 # Optional run config (forwarded to train_ddp.py):
-#   EPOCHS, BATCH_SIZE, OUT_DIR
+#   EPOCHS, BATCH_SIZE, OUT_DIR, SUBDIVISIONS, N_STAGES
 set -euo pipefail
 
 cd "$(dirname "$0")/.."  # repo root
@@ -52,6 +52,8 @@ fi
 EPOCHS="${EPOCHS:-20}"
 BATCH_SIZE="${BATCH_SIZE:-4}"
 OUT_DIR="${OUT_DIR:-runs/student_ddp}"
+SUBDIVISIONS="${SUBDIVISIONS:-3}"
+N_STAGES="${N_STAGES:-1}"
 
 # ── sanity check ──────────────────────────────────────────────────────────────
 if (( NODE_RANK < 0 || NODE_RANK >= NNODES )); then
@@ -74,5 +76,7 @@ torchrun \
     --epochs "$EPOCHS" \
     --batch-size "$BATCH_SIZE" \
     --out-dir "$OUT_DIR" \
+    --subdivisions "$SUBDIVISIONS" \
+    --n-stages "$N_STAGES" \
     --categories chair sofa \
     "$@"
