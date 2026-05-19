@@ -253,6 +253,12 @@ def main() -> None:
     p.add_argument("--val-split", type=float, default=0.1)
     p.add_argument("--hidden", type=int, default=128)
     p.add_argument("--n-stages", type=int, default=1)
+    p.add_argument(
+        "--subdivisions",
+        type=int,
+        default=3,
+        help="Icosphere subdivisions: 3=642 verts, 4=2562, 5=10242",
+    )
     p.add_argument("--device", default="auto")
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--num-workers", type=int, default=0)
@@ -343,7 +349,7 @@ def main() -> None:
     )
 
     # ── model ─────────────────────────────────────────────────────────────────
-    tpl = build_template()
+    tpl = build_template(subdivisions=args.subdivisions)
     tpl.verts = tpl.verts - tpl.verts.mean(dim=0, keepdim=True)
     tpl.verts = tpl.verts / tpl.verts.norm(dim=1).max()
 
