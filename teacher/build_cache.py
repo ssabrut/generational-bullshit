@@ -36,6 +36,7 @@ sys.path.insert(0, str(REPO))
 sys.path.insert(0, str(Path(__file__).parent))
 
 from align import align_to_target, apply_transform
+from bake_texture import bake_vertex_colors_to_texture, unwrap
 from tsr.system import TSR
 from tsr.utils import resize_foreground
 
@@ -119,6 +120,12 @@ def main() -> None:
     p.add_argument("--chunk-size", type=int, default=4096)
     p.add_argument("--device", default="cpu", choices=["cpu", "mps", "cuda"])
     p.add_argument(
+        "--bake-texture",
+        action="store_true",
+        help="UV-unwrap and bake vertex colors → .obj + .mtl + .png",
+    )
+    p.add_argument("--tex-size", type=int, default=1024)
+    p.add_argument(
         "--limit",
         type=int,
         default=None,
@@ -195,9 +202,34 @@ def main() -> None:
 
             # ── 4. apply transform → canonical mesh ───────────────────────
             canon_verts = apply_transform(np.asarray(src_mesh.vertices, dtype=float), M)
-            canon_mesh = trimesh.Trimesh(
-                vertices=canon_verts, faces=src_mesh.faces, process=False
-            )
+
+            if args.bake_texture and getattr(src_mesh.visual, "vertex_colors", None) is not None:
+                vcols = src_mesh.visual.vertex_colors[:, :3].astype(np.float32) / 255.0
+                bare = trimesh.Trimesh(
+                    vertices=canon_verts, faces=src_mesh.faces, process=False
+                )
+                vmapping, indices, uvs = unwrap(bare)
+                new_vertices = canon_verts[vmapping]
+                new_vcols = vcols[vmapping]
+                texture = bake_vertex_colors_to_texture(
+                    uvs, indices, new_vcols, args.tex_size
+                )
+                texture.save(sub / "canonical_mesh.png")
+                visual = trimesh.visual.TextureVisuals(
+                    uv=uvs,
+                    image=texture,
+                    material=trimesh.visual.material.SimpleMaterial(image=texture),
+                )
+                canon_mesh = trimesh.Trimesh(
+                    vertices=new_vertices,
+                    faces=indices,
+                    visual=visual,
+                    process=False,
+                )
+            else:
+                canon_mesh = trimesh.Trimesh(
+                    vertices=canon_verts, faces=src_mesh.faces, process=False
+                )
             canon_mesh.export(sub / "canonical_mesh.obj")
 
             # ── 5. Poisson-disk point cloud ───────────────────────────────
