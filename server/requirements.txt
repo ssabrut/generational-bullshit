@@ -1,0 +1,20 @@
+# TripoSR mesh server dependencies
+# Install into your existing AI conda env, or a fresh venv:
+#   pip install -r server/requirements.txt
+
+fastapi>=0.111.0
+uvicorn[standard]>=0.29.0
+python-multipart>=0.0.9       # FastAPI file uploads
+
+onnxruntime>=1.18.0           # CPU; swap for onnxruntime-gpu if CUDA available
+onnx>=1.16.0
+
+torch>=2.2.0                  # NeRF decoder + marching cubes (already in AI env)
+trimesh>=4.3.0
+rembg>=2.0.57
+Pillow>=10.0.0
+numpy>=1.24.0
+einops>=0.7.0
+omegaconf>=2.3.0
+transformers>=4.40.0          # ViT model (already in AI env)
+huggingface_hub>=0.23.0

@@ -1,0 +1,15 @@
+easyocr
+ipython
+matplotlib
+networkx
+numpy
+opencv_contrib_python
+opencv_python
+opencv_python_headless
+Pillow
+scikit-image
+torch
+torchvision
+tqdm
+ultralytics
+onnxruntime
